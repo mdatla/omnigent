@@ -802,6 +802,12 @@ def test_resolve_prefers_pi_own_login_for_served_reference(
         seed_pi_own_login_catalog(tmp_path, provider_id, [model_id, "picker-model"])
     if curated:
         (tmp_path / "settings.json").write_text(json.dumps({"enabledModels": [alternative]}))
+        # Resolver grammar has real-Pi coverage; this checks inventory versus picker use.
+        monkeypatch.setattr(
+            creds,
+            "scope_models",
+            lambda patterns, entries: [creds.ScopableModel(provider_id, "picker-model")],
+        )
         assert [o["id"] for o in creds.pi_own_login_model_options(tmp_path)] == [alternative]
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
 
