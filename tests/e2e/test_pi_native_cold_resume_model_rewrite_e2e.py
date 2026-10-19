@@ -203,20 +203,20 @@ def _seed_cold_resume_pi_home(home: Path) -> str:
 
 
 def _wait_for_pushed_model_options(
-    client: httpx.Client, session_id: str, expected_id: str, timeout: float = 90.0
+    client: httpx.Client, session_id: str, expected_ids: set[str], timeout: float = 90.0
 ) -> list[dict]:
-    """Poll the session until the relaunched Pi has published a catalog listing *expected_id*."""
+    """Wait for the relaunched Pi to replace the saved catalog with its new scope."""
     deadline = time.monotonic() + timeout
     options: list[dict] = []
     while time.monotonic() < deadline:
         resp = client.get(f"/v1/sessions/{session_id}", timeout=10.0)
         if resp.status_code == 200:
             options = resp.json().get("model_options") or []
-            if any(option.get("id") == expected_id for option in options):
+            if {option.get("id") for option in options} == expected_ids:
                 return options
         time.sleep(1.0)
     raise AssertionError(
-        f"the relaunched Pi never published a model catalog listing {expected_id!r}; "
+        f"the relaunched Pi never published a model catalog listing {expected_ids!r}; "
         f"last model_options: {options}"
     )
 
@@ -399,7 +399,7 @@ def test_cold_resume_keeps_explicit_openai_codex_selection(
         option_ids = [
             option.get("id")
             for option in _wait_for_pushed_model_options(
-                http_client, session_id, _EXPLICIT_SELECTION
+                http_client, session_id, {_EXPLICIT_SELECTION, f"{_PI_OWN_PROVIDER}/gpt-5.5"}
             )
         ]
         own_login_ids = [i for i in option_ids if str(i).startswith(f"{_PI_OWN_PROVIDER}/")]
