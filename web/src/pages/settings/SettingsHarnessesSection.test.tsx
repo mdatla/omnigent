@@ -146,6 +146,13 @@ let harnessInstall = true;
 vi.mock("@/lib/CapabilitiesContext", () => ({
   useServerInfo: () => ({
     features: { harness_install: harnessInstall },
+    installable_harnesses: [
+      "claude-native",
+      "codex-native",
+      "opencode-native",
+      "pi-native",
+      "qwen-native",
+    ],
   }),
 }));
 
@@ -277,6 +284,14 @@ describe("Harnesses grid", () => {
     expect(dialog.getAttribute("data-mode")).toBe("install");
     expect(within(card("codex-native")).queryByText("Needs reconfiguration")).toBeNull();
     expect(within(card("codex-native")).getByText("Not installed")).toBeTruthy();
+  });
+
+  it("does not offer one-click install for a not-installed Cursor harness", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "cursor-native": "binary-missing" } }];
+    renderHarnesses();
+
+    expect(screen.queryByTestId("harness-action-cursor-native")).toBeNull();
+    expect(screen.getByTestId("harness-settings-cursor-native")).toBeTruthy();
   });
 
   it("uses the existing inventory label instead of guessing a personal subscription", () => {
@@ -492,6 +507,33 @@ describe("Harness details", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Update" }));
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "update");
+  });
+
+  it("uses Set up for a not-installed Cursor harness", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "cursor-native": "binary-missing" } }];
+    renderHarnesses("cursor-native");
+
+    expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Set up" }));
+    expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "install");
+  });
+
+  it("uses Set up instead of Update for an outdated Cursor harness", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "cursor-native": "version-too-low" } }];
+    renderHarnesses("cursor-native");
+
+    expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Set up" }));
+    expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "update");
+  });
+
+  it("uses Set up instead of Reconfigure for a non-installable Cursor harness", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "cursor-native": "needs-auth" } }];
+    renderHarnesses("cursor-native");
+
+    expect(screen.queryByRole("button", { name: "Reconfigure" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Set up" }));
+    expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
   });
 
   it.each([

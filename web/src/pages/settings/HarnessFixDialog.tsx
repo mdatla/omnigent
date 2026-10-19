@@ -26,6 +26,7 @@ import {
   HARNESS_CREDENTIAL_COPY,
   harnessAuthableOnHost,
   harnessCredentialFamily,
+  harnessInstallableOnHost,
   isCodexHarness,
   type HarnessCredentialKind,
 } from "@/lib/harnessSetup";
@@ -79,8 +80,11 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       canonicalHarness === "claude-native");
   const hasCredentialCards = isaacSupported || personalSupported;
   const canUseCredentialForm = harnessAuthableOnHost(info, harness, host);
-  const initialPhase: Phase =
-    mode === "update"
+  const installable = harnessInstallableOnHost(info, harness, host);
+  const requiresManualSetup = !installable && (mode === "install" || mode === "update");
+  const initialPhase: Phase = requiresManualSetup
+    ? "setup"
+    : mode === "update"
       ? "progress"
       : mode === "install" && !hasCredentialCards
         ? "install"
@@ -137,6 +141,13 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   }, [hasCredentialCards, mode]);
 
   const start = useCallback(async () => {
+    if (requiresManualSetup) {
+      setError("");
+      setStillNotReady(false);
+      setUpdatedNeedsSetup(false);
+      setPhase("setup");
+      return;
+    }
     const id = ++runId.current;
     setError("");
     setStillNotReady(false);
@@ -165,6 +176,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     installHarness,
     mode,
     needsSetup,
+    requiresManualSetup,
   ]);
   const startRef = useRef(start);
   startRef.current = start;
@@ -178,11 +190,11 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     setUpdatedNeedsSetup(false);
     setChecking(false);
     setPhase(initialPhase);
-    if (mode === "update") void startRef.current();
+    if (mode === "update" && installable) void startRef.current();
     return () => {
       runId.current += 1;
     };
-  }, [harness, hostId, initialPhase, isaacSupported, mode, open]);
+  }, [harness, hostId, initialPhase, installable, isaacSupported, mode, open]);
 
   const setOpen = (nextOpen: boolean) => {
     if (!nextOpen) runId.current += 1;
@@ -195,7 +207,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     setStillNotReady(false);
     setUpdatedNeedsSetup(false);
     setPhase(initialPhase);
-    if (mode === "update") void start();
+    if (mode === "update" && installable) void start();
   };
 
   const refetchReadinessFromHosts = useCallback(async () => {

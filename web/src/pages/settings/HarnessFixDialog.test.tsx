@@ -12,7 +12,16 @@ vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
 vi.mock("@/components/ui/toast", () => ({ showToast: vi.fn() }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@/lib/CapabilitiesContext", () => ({
-  useServerInfo: () => ({ features: { harness_install: true } }),
+  useServerInfo: () => ({
+    features: { harness_install: true },
+    installable_harnesses: [
+      "claude-native",
+      "codex-native",
+      "opencode-native",
+      "pi-native",
+      "qwen-native",
+    ],
+  }),
 }));
 
 function json(body: unknown, init: ResponseInit = {}) {
@@ -91,6 +100,38 @@ beforeEach(() => {
 });
 
 describe("HarnessFixDialog", () => {
+  it.each([
+    ["install", "not installed"],
+    ["update", "out of date"],
+  ] as const)(
+    "opens manual setup without an install request when Cursor is %s (%s)",
+    async (mode, _state) => {
+      renderDialog({ mode, harness: "cursor-native", harnessLabel: "Cursor" });
+
+      expect(screen.getByRole("heading", { name: "Set up Cursor on Local laptop" })).toBeVisible();
+      expect(
+        screen.getByText((_, element) =>
+          Boolean(
+            element?.tagName === "P" &&
+            element.textContent === "Run omni setup on Local laptop to finish setting up Cursor.",
+          ),
+        ),
+      ).toBeVisible();
+      expect(screen.getByRole("button", { name: "Copy omni setup" })).toBeVisible();
+      expect(
+        screen
+          .getAllByRole("button", { name: "Close" })
+          .find((button) => button.textContent === "Close"),
+      ).toBeVisible();
+      expect(screen.getByRole("button", { name: "Check again" })).toBeVisible();
+      expect(
+        vi
+          .mocked(authenticatedFetch)
+          .mock.calls.some(([input]) => String(input).endsWith("/install")),
+      ).toBe(false);
+    },
+  );
+
   it("shows the Isaac setup fallback without calling the credential endpoint", async () => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
       const url = String(input);
@@ -397,6 +438,10 @@ describe("HarnessFixDialog", () => {
         configuredHarnesses: { "opencode-native": true },
         credentialKind: undefined,
       }),
+    );
+    expect(authenticatedFetch).toHaveBeenCalledWith(
+      "/v1/hosts/host%2F1/harnesses/opencode-native/install",
+      { method: "POST" },
     );
   });
 

@@ -29,6 +29,7 @@ import { INVENTORY_HARNESS_IDS } from "@/hooks/useHarnessInventory";
 import { BRAND_HARNESSES } from "@/components/onboarding/harnessBrand";
 import {
   HARNESS_CREDENTIAL_COPY,
+  harnessInstallableOnHost,
   harnessReadinessOnHost,
   harnessWarningBadgeText,
   type HarnessCredentialKind,
@@ -156,6 +157,7 @@ export const SettingsHarnessesSection = () => {
           entry={detail}
           host={selectedHost}
           canSetup={canSetup}
+          installable={harnessInstallableOnHost(info, detail.harness, selectedHost)}
           credentialKind={
             selectedHost
               ? credentialKinds[hostHarnessKey(selectedHost.host_id, detail.harness)]
@@ -220,6 +222,7 @@ export const SettingsHarnessesSection = () => {
                 entry={entry}
                 host={selectedHost}
                 canSetup={canSetup}
+                installable={harnessInstallableOnHost(info, entry.harness, selectedHost)}
                 credentialKind={
                   selectedHost
                     ? credentialKinds[hostHarnessKey(selectedHost.host_id, entry.harness)]
@@ -474,12 +477,14 @@ function HarnessCard({
   entry,
   host,
   canSetup,
+  installable,
   credentialKind,
   onFix,
 }: {
   entry: HarnessEntry;
   host: Host | null;
   canSetup: boolean;
+  installable: boolean;
   credentialKind?: HarnessCredentialKind;
   onFix: (mode: HarnessFixMode) => void;
 }) {
@@ -506,7 +511,8 @@ function HarnessCard({
             />
           </div>
         </div>
-        {(status.ready || (status.needsSetup && canFix && mode !== "install")) && (
+        {(status.ready ||
+          (status.needsSetup && canFix && (mode !== "install" || !installable))) && (
           <Button
             size="icon-sm"
             variant="ghost"
@@ -522,7 +528,7 @@ function HarnessCard({
             <SettingsIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
           </Button>
         )}
-        {status.needsSetup && canFix && mode === "install" && (
+        {status.needsSetup && canFix && installable && mode === "install" && (
           <SetupButton entry={entry} onSetup={() => onFix("install")} />
         )}
       </div>
@@ -556,6 +562,7 @@ function HarnessDetail({
   entry,
   host,
   canSetup,
+  installable,
   credentialKind,
   readyNotice,
   onFix,
@@ -563,6 +570,7 @@ function HarnessDetail({
   entry: HarnessEntry;
   host: Host | null;
   canSetup: boolean;
+  installable: boolean;
   credentialKind?: HarnessCredentialKind;
   readyNotice: { harness: string; hostId: string; version?: string } | null;
   onFix: (mode: HarnessFixMode) => void;
@@ -622,6 +630,7 @@ function HarnessDetail({
           host={host}
           mode={mode}
           reason={status.reason}
+          installable={installable}
           onFix={onFix}
         />
       )}
@@ -663,6 +672,7 @@ function HarnessDetail({
               host={host}
               mode={mode}
               reason={status.reason}
+              installable={installable}
               onFix={onFix}
             />
             {credentialCard}
@@ -700,12 +710,14 @@ function HarnessWarning({
   host,
   mode,
   reason,
+  installable,
   onFix,
 }: {
   entry: HarnessEntry;
   host: Host;
   mode: HarnessFixMode;
   reason: string | null;
+  installable: boolean;
   onFix: (mode: HarnessFixMode) => void;
 }) {
   const copy =
@@ -716,7 +728,13 @@ function HarnessWarning({
         : mode === "update"
           ? `${entry.name} is out of date on ${host.name}. Update it so new sessions can use ${entry.name}.`
           : `${entry.name} isn’t set up on ${host.name}, so new sessions can’t use ${entry.name}.`;
-  const action = mode === "update" ? "Update" : mode === "install" ? "Install" : "Reconfigure";
+  const action = !installable
+    ? "Set up"
+    : mode === "update"
+      ? "Update"
+      : mode === "install"
+        ? "Install"
+        : "Reconfigure";
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-ui">
       <div className="flex min-w-0 flex-1 items-start gap-3">
