@@ -4427,6 +4427,7 @@ function LegacySessionTooltipContent({
   hostsById: ReadonlyMap<string, Host>;
   hasError: boolean;
 }) {
+  const managed = isFeatureEnabled(useContext(ServerInfoContext), "pull_request_management");
   return (
     <TooltipContent
       side="right"
@@ -4451,14 +4452,18 @@ function LegacySessionTooltipContent({
         <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
         <span className="truncate">{sessionLocationLabel(conversation, hostsById)}</span>
       </p>
-      {conversation.git_branch && (
-        <p
-          data-testid="session-tooltip-branch"
-          className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground"
-        >
-          <GitBranchIcon aria-hidden className="size-3.5 shrink-0" />
-          <span className="truncate">{conversation.git_branch}</span>
-        </p>
+      {managed ? (
+        <SessionTooltipDetails conversation={conversation} />
+      ) : (
+        conversation.git_branch && (
+          <p
+            data-testid="session-tooltip-branch"
+            className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground"
+          >
+            <GitBranchIcon aria-hidden className="size-3.5 shrink-0" />
+            <span className="truncate">{conversation.git_branch}</span>
+          </p>
+        )
       )}
       {hasError && <SessionErrorHint />}
     </TooltipContent>

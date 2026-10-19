@@ -162,23 +162,23 @@ export function usePullRequests(sessions: readonly Conversation[]): CanvasPullRe
           // Claim the slot so a rebuilt queue does not re-enqueue an in-flight lookup;
           // a failure below shortens the wait to the retry window.
           checkedAtRef.current[session.id] = Date.now();
-          if (managed) {
-            const data = await queryClient.fetchQuery({
-              queryKey: ["session-prs", session.id],
-              queryFn: () => fetchSessionPullRequests(session.id),
-              staleTime: GITHUB_INFO_STALE_MS,
-            });
-            const next = fromAssociations(data.prs);
-            if (aliveRef.current)
-              setPullRequests((current) =>
-                samePullRequest(current[session.id], next)
-                  ? current
-                  : { ...current, [session.id]: next },
-              );
-            return;
-          }
           let info;
           try {
+            if (managed) {
+              const data = await queryClient.fetchQuery({
+                queryKey: ["session-prs", session.id],
+                queryFn: () => fetchSessionPullRequests(session.id),
+                staleTime: GITHUB_INFO_STALE_MS,
+              });
+              const next = fromAssociations(data.prs);
+              if (aliveRef.current)
+                setPullRequests((current) =>
+                  samePullRequest(current[session.id], next)
+                    ? current
+                    : { ...current, [session.id]: next },
+                );
+              return;
+            }
             info = await queryClient.fetchQuery({
               queryKey: ["github-info", session.id],
               queryFn: () => fetchPullRequestInfo(session.id),

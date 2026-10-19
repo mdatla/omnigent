@@ -24,7 +24,7 @@ def pr_server(
     yield from spawn_multi_user_server(
         mock_llm_server_url,
         tmp_path_factory.mktemp("pr-management"),
-        extra_server_env={"OMNIGENT_FEATURES": "pull_request_management"},
+        extra_server_env={"OMNIGENT_FEATURES": "pull_request_management,canvas"},
     )
 
 
@@ -33,7 +33,8 @@ def test_link_prs_without_workspace(
     browser: Browser, pr_server: MultiUserServer, tmp_path: Path, mobile: bool
 ) -> None:
     headers = {"X-Forwarded-Email": ADMIN_EMAIL}
-    session = create_user_session(pr_server.base_url, headers=headers)
+    title = f"Manual PRs {'mobile' if mobile else 'desktop'}"
+    session = create_user_session(pr_server.base_url, headers=headers, metadata={"title": title})
     other = create_user_session(pr_server.base_url, headers=headers)
     url = "https://github.com/acme/app/pull/7"
     other_path = f"{pr_server.base_url}/v1/sessions/{other}/resources/github/prs"
@@ -60,7 +61,25 @@ def test_link_prs_without_workspace(
         expect(panel.get_by_role("list", name="Linked pull requests")).to_contain_text(
             "acme/app #7"
         )
+        panel.get_by_role("button", name="Link a PR").click()
+        panel.get_by_role("textbox", name="Pull request URL").fill(url.replace("/7", "/8"))
+        panel.get_by_role("button", name="Link", exact=True).click()
+        expect(panel.get_by_role("list", name="Linked pull requests")).to_contain_text(
+            "acme/app #8"
+        )
         page.screenshot(path=str(tmp_path / "linked-offline.png"))
+        if not mobile:
+            expect(page.get_by_test_id("composer-pr-link")).to_have_text("2 PRs")
+            page.get_by_role("link", name=title, exact=True).hover()
+            expect(page.get_by_test_id("session-tooltip-pr")).to_contain_text("2 linked PRs")
+            page.goto(f"{pr_server.public_url}/canvas")
+            card = page.get_by_test_id("session-card").filter(has_text=title)
+            expect(card).to_contain_text("2 linked PRs")
+            expect(card.get_by_role("link", name="Open pull request #7")).to_have_attribute(
+                "href", url
+            )
+            page.screenshot(path=str(tmp_path / "linked-canvas.png"))
+            page.goto(f"{pr_server.public_url}/c/{session}")
         page.reload()
         if mobile:
             page.get_by_test_id("header-conversation-actions").click()
@@ -69,6 +88,10 @@ def test_link_prs_without_workspace(
             "acme/app #7"
         )
         panel.get_by_role("button", name="Unlink acme/app #7").click()
+        expect(panel.get_by_role("list", name="Linked pull requests")).not_to_contain_text(
+            "acme/app #7"
+        )
+        panel.get_by_role("button", name="Unlink acme/app #8").click()
         expect(panel.get_by_role("list", name="Linked pull requests")).to_contain_text(
             "No linked pull requests"
         )

@@ -17,7 +17,14 @@ import {
   usePullRequests,
 } from "./pullRequests";
 
-vi.mock("@/hooks/usePullRequests", () => ({ fetchPullRequestInfo: vi.fn() }));
+vi.mock("@/hooks/usePullRequests", () => ({
+  fetchPullRequestInfo: vi.fn(),
+  fetchSessionPullRequests: vi.fn(),
+}));
+const feature = vi.hoisted(() => ({ enabled: false }));
+vi.mock("@/lib/CapabilitiesContext", () => ({
+  useServerInfo: () => ({ features: { pull_request_management: feature.enabled } }),
+}));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -109,12 +116,40 @@ describe("PullRequestQueue", () => {
 describe("usePullRequests", () => {
   beforeEach(() => {
     vi.mocked(pullRequestHooks.fetchPullRequestInfo).mockReset();
+    vi.mocked(pullRequestHooks.fetchSessionPullRequests).mockReset();
+    feature.enabled = false;
   });
 
   function wrapper({ children }: { children: ReactNode }) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     return createElement(QueryClientProvider, { client }, children);
   }
+
+  it("loads flagged branchless sessions, retries failures and reflects association mutations", async () => {
+    feature.enabled = true;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(pullRequestHooks.fetchSessionPullRequests)
+      .mockRejectedValueOnce(new Error("Disconnected"))
+      .mockResolvedValue({ prs: [association(), association({ number: 8 })] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const sessions = [session("plain", null)];
+    const { result } = renderHook(() => usePullRequests(sessions), {
+      wrapper: ({ children }) => createElement(QueryClientProvider, { client }, children),
+    });
+    await waitFor(() => expect(pullRequestHooks.fetchSessionPullRequests).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PULL_REQUEST_RETRY_MS + 50);
+    });
+    await waitFor(() =>
+      expect(result.current.plain).toMatchObject({ number: 7, count: 2, state: "UNKNOWN" }),
+    );
+    expect(pullRequestHooks.fetchPullRequestInfo).not.toHaveBeenCalled();
+    act(() => {
+      client.setQueryData(["session-prs", "plain"], { prs: [] });
+    });
+    expect(result.current.plain).toBeNull();
+    vi.useRealTimers();
+  });
 
   it("looks up only branch-bearing sessions, bounded by the concurrency limit", async () => {
     const gates = new Map<string, ReturnType<typeof deferred<PullRequestInfo>>>();
