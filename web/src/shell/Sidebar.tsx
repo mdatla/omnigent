@@ -4354,8 +4354,11 @@ function pullRequestStatus(pr: PullRequest): { icon: LucideIcon; label: string }
 // its content on open) and shared with the GitHub panel's cache.
 function SessionTooltipDetails({ conversation }: { conversation: Conversation }) {
   const viewerId = useContext(ViewerIdContext);
+  const managed = isFeatureEnabled(useContext(ServerInfoContext), "pull_request_management");
   // Only a workspace-bound session has a checkout to read GitHub state from.
-  const { data: github } = usePullRequestInfo(conversation.workspace ? conversation.id : undefined);
+  const { data: github } = usePullRequestInfo(
+    managed || conversation.workspace ? conversation.id : undefined,
+  );
   // `owner` is null when permissions are off; there's no creator to name then.
   const owner = conversation.owner ?? null;
   const createdBy = owner !== null && isOwnedByViewer(conversation, viewerId) ? "You" : owner;
@@ -4393,6 +4396,7 @@ function SessionTooltipDetails({ conversation }: { conversation: Conversation })
           testId="session-tooltip-pr"
         >
           #{prNumber}
+          {managed && (github?.prs?.length ?? 0) > 1 ? ` · ${github!.prs!.length} linked PRs` : ""}
           {prStatus ? ` · ${prStatus.label}` : ""}
         </SessionTooltipDetail>
       )}

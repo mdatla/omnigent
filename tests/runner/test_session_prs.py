@@ -1374,3 +1374,18 @@ def test_shell_continuation_respects_quoting(quote: str, created: bool) -> None:
     refs, was_created = extract_prs("Bash", {"command": command}, A)
     assert [pr.url for pr in refs] == [A]
     assert was_created is created
+
+
+def test_server_sync_imports_legacy_exclusions_and_preserves_removal(tmp_path: Path) -> None:
+    registry = SessionPrRegistry("session", root=tmp_path)
+    url = "https://github.com/acme/app/pull/7"
+    reference = PullRequestRef.from_url(url)
+    registry.record([reference], relationship="created", source="test")
+    snapshot = registry.sync({})
+    assert len(snapshot["prs"]) == 1
+    registry.remove(url)
+    assert registry.sync({})["excluded"] == [url]
+    assert len(registry.sync(snapshot)["prs"]) == 1
+    registry.sync({"excluded": [url]})
+    registry.record([reference], relationship="created", source="replay")
+    assert registry.list() == []

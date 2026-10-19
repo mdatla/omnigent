@@ -232,6 +232,23 @@ class SessionPrRegistry:
             # Commit the exclusion before deleting its companion association.
             self._write(state, legacy_first=reference.provider != "github")
 
+    def sync(self, snapshot: dict[str, object]) -> dict[str, object]:
+        """Apply server choices atomically and return legacy observations for import."""
+        incoming = _Registry.model_validate(snapshot)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with FileLock(str(self.path) + ".lock", timeout=1):
+            state = self._read()
+            entries = {pr.url: pr for pr in state.prs}
+            excluded = set(state.excluded)
+            for entry in incoming.prs:
+                excluded.discard(entry.url)
+                entries[entry.url] = entry
+            excluded.update(incoming.excluded)
+            state.excluded = sorted(excluded)
+            state.prs = [entry for url, entry in entries.items() if url not in excluded]
+            self._write(state)
+            return {"prs": [entry.model_dump() for entry in state.prs], "excluded": state.excluded}
+
 
 def observation_key(source: str, call_id: str, payload: object) -> str:
     """Prefer stable provider call IDs; hash payloads when a transport omits one."""

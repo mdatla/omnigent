@@ -3059,6 +3059,36 @@ async def test_github_info_proxies_to_runner(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_server_pr_links_need_no_workspace_or_provider(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.server.feature_flags import Feature, FeatureFlags
+    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+    store = SqlAlchemyConversationStore(db_uri)
+    session = store.create_conversation()
+    stub = app.state.test_conversation_store
+    stub._conversations[session.id] = session
+    monkeypatch.setattr(stub, "get_pull_requests", store.get_pull_requests, raising=False)
+    monkeypatch.setattr(stub, "update_pull_requests", store.update_pull_requests, raising=False)
+    path = f"/v1/sessions/{session.id}/resources/github/prs"
+    assert (await client.get(path)).status_code == 404
+    app.state.feature_flags = FeatureFlags(frozenset({Feature.PULL_REQUEST_MANAGEMENT}))
+    url = "https://github.com/acme/app/pull/7"
+    response = await client.post(path, json={"url": url, "action": "attach"})
+    assert response.status_code == 200
+    assert response.json()["selected_pr_url"] == url
+    assert (await client.get(path)).json()["prs"][0]["url"] == url
+    response = await client.post(path, json={"url": url, "action": "remove"})
+    assert response.status_code == 200
+    assert (await client.get(path)).json()["prs"] == []
+    assert (await client.post(path, json={"url": url, "action": "import"})).status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_github_changes_proxies_to_runner(client: httpx.AsyncClient) -> None:
     """GET /resources/github/changes proxies the PR file list to the runner."""
     fake_runner = _FakeRunnerClient(payload={"object": "list", "data": [], "has_more": False})

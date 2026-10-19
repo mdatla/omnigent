@@ -42,6 +42,46 @@ from omnigent.stores.host_store import HostStore
 # ── CRUD ──────────────────────────────────────────────
 
 
+def test_session_pull_requests_survive_replay_and_fork_independently(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    store = conversation_store
+    source = store.create_conversation()
+    url = "https://github.com/acme/app/pull/7"
+    state = store.update_pull_requests(
+        source.id, url="https://GITHUB.COM/ACME/APP/pull/7", action="attach"
+    )
+    store.update_pull_requests(source.id, url=url + "/files?ignored=yes", action="attach")
+    assert len(store.get_pull_requests(source.id)["prs"]) == 1
+    fork = store.fork_conversation(source.id)
+    store.update_pull_requests(source.id, url=url, action="remove")
+    assert store.update_pull_requests(source.id, snapshot=state)["prs"] == []
+    assert len(store.get_pull_requests(fork.id)["prs"]) == 1
+    store.update_pull_requests(source.id, url=url, action="attach")
+    assert len(store.update_pull_requests(source.id, snapshot={"excluded": [url]})["prs"]) == 1
+    other = store.create_conversation()
+    store.update_pull_requests(other.id, snapshot={"excluded": [url]})
+    assert store.update_pull_requests(other.id, snapshot=state)["prs"] == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "not a URL",
+        "https://github.com/acme/app/issues/7",
+        "https://user:password@github.com/acme/app/pull/7",
+    ],
+)
+def test_session_pull_requests_validate_without_provider_access(
+    conversation_store: SqlAlchemyConversationStore,
+    url: str,
+) -> None:
+    source = conversation_store.create_conversation()
+    with pytest.raises(ValueError):
+        conversation_store.update_pull_requests(source.id, url=url, action="attach")
+    assert conversation_store.get_pull_requests(source.id)["prs"] == []
+
+
 class _CommitSerializationFailure(Exception):
     """Synthetic CockroachDB serialization failure."""
 

@@ -6,7 +6,13 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { GitProviderDisplay } from "@/lib/gitProviders";
 import type { Conversation } from "@/hooks/useConversations";
-import { fetchPullRequestInfo } from "@/hooks/usePullRequests";
+import {
+  fetchPullRequestInfo,
+  fetchSessionPullRequests,
+  type PullRequestAssociation,
+} from "@/hooks/usePullRequests";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { isFeatureEnabled } from "@/lib/capabilities";
 
 export const PULL_REQUEST_REFRESH_MS = 300_000;
 /** A failed lookup is retried this soon instead of waiting the full refresh window. */
@@ -16,6 +22,7 @@ export const PULL_REQUEST_CONCURRENCY = 4;
 const GITHUB_INFO_STALE_MS = 30_000;
 
 export interface CanvasPullRequest {
+  count?: number;
   number: number;
   title: string;
   /** "OPEN" | "MERGED" | "CLOSED" as reported by gh. */
@@ -27,6 +34,13 @@ export interface CanvasPullRequest {
 }
 
 export type CanvasPullRequests = Record<string, CanvasPullRequest | null>;
+
+function fromAssociations(prs: PullRequestAssociation[]): CanvasPullRequest | null {
+  const pr = prs[0];
+  return pr
+    ? { ...pr, title: pr.title ?? "", state: pr.state ?? "UNKNOWN", count: prs.length }
+    : null;
+}
 
 interface PullRequestTask {
   key: string;
@@ -80,6 +94,7 @@ function samePullRequest(
   if (left === null || right === null) return left === right;
   return (
     left.number === right.number &&
+    left.count === right.count &&
     left.title === right.title &&
     left.state === right.state &&
     left.url === right.url &&
@@ -97,6 +112,7 @@ function samePullRequest(
  * rebuilt whenever it changes, and re-checked on a timer in between.
  */
 export function usePullRequests(sessions: readonly Conversation[]): CanvasPullRequests {
+  const managed = isFeatureEnabled(useServerInfo(), "pull_request_management");
   const queryClient = useQueryClient();
   const [pullRequests, setPullRequests] = useState<CanvasPullRequests>({});
   // Bumped on a timer so lookups fall due even while the session list is unchanged.
@@ -105,6 +121,20 @@ export function usePullRequests(sessions: readonly Conversation[]): CanvasPullRe
   const queueRef = useRef<PullRequestQueue | null>(null);
   queueRef.current ??= new PullRequestQueue(PULL_REQUEST_CONCURRENCY);
   const aliveRef = useRef(true);
+
+  useEffect(() => {
+    if (!managed) return;
+    return queryClient.getQueryCache().subscribe((event) => {
+      if (event.type !== "updated" || event.query.queryKey[0] !== "session-prs") return;
+      const id = event.query.queryKey[1] as string;
+      const data = event.query.state.data as { prs: PullRequestAssociation[] } | undefined;
+      if (!data) return;
+      const next = fromAssociations(data.prs);
+      setPullRequests((current) =>
+        samePullRequest(current[id], next) ? current : { ...current, [id]: next },
+      );
+    });
+  }, [managed, queryClient]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -122,7 +152,7 @@ export function usePullRequests(sessions: readonly Conversation[]): CanvasPullRe
     const now = Date.now();
     const due = sessions.filter(
       (session) =>
-        Boolean(session.git_branch?.trim()) &&
+        (managed || Boolean(session.git_branch?.trim())) &&
         now - (checkedAtRef.current[session.id] ?? 0) >= PULL_REQUEST_REFRESH_MS,
     );
     queue.replace(
@@ -132,6 +162,21 @@ export function usePullRequests(sessions: readonly Conversation[]): CanvasPullRe
           // Claim the slot so a rebuilt queue does not re-enqueue an in-flight lookup;
           // a failure below shortens the wait to the retry window.
           checkedAtRef.current[session.id] = Date.now();
+          if (managed) {
+            const data = await queryClient.fetchQuery({
+              queryKey: ["session-prs", session.id],
+              queryFn: () => fetchSessionPullRequests(session.id),
+              staleTime: GITHUB_INFO_STALE_MS,
+            });
+            const next = fromAssociations(data.prs);
+            if (aliveRef.current)
+              setPullRequests((current) =>
+                samePullRequest(current[session.id], next)
+                  ? current
+                  : { ...current, [session.id]: next },
+              );
+            return;
+          }
           let info;
           try {
             info = await queryClient.fetchQuery({
@@ -167,7 +212,7 @@ export function usePullRequests(sessions: readonly Conversation[]): CanvasPullRe
       })),
     );
     return () => queue.clear();
-  }, [queryClient, sessions, tick]);
+  }, [queryClient, sessions, tick, managed]);
 
   return pullRequests;
 }

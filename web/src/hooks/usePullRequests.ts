@@ -19,6 +19,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { GitProviderDisplay } from "@/lib/gitProviders";
 import { authenticatedFetch } from "@/lib/identity";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { isFeatureEnabled } from "@/lib/capabilities";
 import { isTempConvId } from "@/lib/tempConversationId";
 import {
   isRunnerUnavailable503,
@@ -150,6 +152,7 @@ export type PullRequestUnavailableReason =
   "not_a_git_repo" | "no_os_env" | "unsupported_remote" | "provider_unavailable" | "host_outdated";
 
 export interface PullRequestAssociation {
+  state?: string | null;
   url: string;
   host: string;
   repository: string;
@@ -159,6 +162,16 @@ export interface PullRequestAssociation {
   /** Git provider id; absent from hosts that predate providers (GitHub). */
   provider?: string;
   provider_display?: GitProviderDisplay;
+}
+
+export async function fetchSessionPullRequests(
+  conversationId: string,
+): Promise<{ prs: PullRequestAssociation[] }> {
+  const response = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(conversationId)}/resources/github/prs`,
+  );
+  if (!response.ok) throw await errorFromResponse(response);
+  return response.json();
 }
 
 function prQuery(prUrl?: string): string {
@@ -414,13 +427,27 @@ export function usePullRequestInfo(
   // A `temp:*` id (navigate-first new-chat window) has no server session.
   const conversationId = isTempConvId(rawConversationId) ? undefined : rawConversationId;
   const serveable = useWorkspaceServeable(conversationId);
+  const managed = isFeatureEnabled(useServerInfo(), "pull_request_management");
+  const queryClient = useQueryClient();
+  const associations = useQuery({
+    queryKey: ["session-prs", conversationId],
+    queryFn: () => fetchSessionPullRequests(conversationId!),
+    enabled: managed && !!conversationId,
+    staleTime: 10_000,
+    refetchInterval: options?.poll ? 10_000 : false,
+  });
   // Turn-end backstop: refetch when the focused session goes active→idle, so a
   // just-opened PR appears without opening the tab. Keys off the turn lifecycle,
   // so it works for every harness (no per-harness tool detection).
   useTrailingInvalidate(conversationId, useSessionActive(conversationId), "github-info");
-  return useQuery({
+  const info = useQuery({
     queryKey: ["github-info", conversationId, ...(options?.prUrl ? [options.prUrl] : [])],
-    queryFn: () => fetchPullRequestInfo(conversationId!, options?.prUrl),
+    queryFn: async () => {
+      const data = await fetchPullRequestInfo(conversationId!, options?.prUrl);
+      if (managed && data.prs)
+        queryClient.setQueryData(["session-prs", conversationId], { prs: data.prs });
+      return data;
+    },
     enabled: !!conversationId && serveable !== false,
     retry: shouldRetryRunnerOffline,
     retryDelay: runnerOfflineRetryDelay,
@@ -433,6 +460,17 @@ export function usePullRequestInfo(
       : false,
     refetchIntervalInBackground: false,
   });
+  if (!managed || !associations.data) return info;
+  return {
+    ...info,
+    data: {
+      object: "session.github.info" as const,
+      available: false,
+      ...info.data,
+      prs: associations.data.prs,
+      tracking_available: true,
+    },
+  };
 }
 
 /** The account (a gh login) and/or base repo (a git remote name or `owner/repo`)
@@ -614,6 +652,8 @@ export function useUpdateSessionPr(conversationId: string) {
       return normalizePullRequestInfo((await response.json()) as PullRequestInfo);
     },
     onSuccess: async (info, body) => {
+      await queryClient.cancelQueries({ queryKey: ["session-prs", conversationId] });
+      queryClient.setQueryData(["session-prs", conversationId], { prs: info.prs ?? [] });
       await queryClient.cancelQueries({ queryKey: ["github-info", conversationId] });
       queryClient.setQueryData(["github-info", conversationId], info);
       if (info.selected_pr_url) {

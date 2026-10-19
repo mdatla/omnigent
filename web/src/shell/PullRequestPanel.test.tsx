@@ -9,6 +9,8 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type * as UsePullRequestsModule from "@/hooks/usePullRequests";
+import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
+import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import type {
   PullRequest,
   PullRequestAssociation,
@@ -131,11 +133,16 @@ function file(
   };
 }
 
-function renderPanel() {
+function renderPanel(managed = false, permissionLevel = 3) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(["session", "conv_1"], { id: "conv_1", permissionLevel });
   return render(<PullRequestPanel conversationId="conv_1" />, {
     wrapper: ({ children }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      <CapabilitiesProvider
+        info={{ ...FALLBACK_SERVER_INFO, features: { pull_request_management: managed } }}
+      >
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </CapabilitiesProvider>
     ),
   });
 }
@@ -255,6 +262,43 @@ afterEach(() => {
 });
 
 describe("PullRequestPanel", () => {
+  it.each([1, 2, 3])("lists linked PRs with permission level %s", (permissionLevel) => {
+    state.info!.data = {
+      object: "session.github.info",
+      available: false,
+      tracking_available: true,
+      prs: [
+        {
+          url: "https://github.com/acme/app/pull/7",
+          repository: "acme/app",
+          host: "github.com",
+          number: 7,
+          relationship: "attached",
+        },
+      ],
+    };
+    renderPanel(true, permissionLevel);
+    expect(screen.getByRole("list", { name: "Linked pull requests" })).toHaveTextContent(
+      "acme/app #7",
+    );
+    expect(screen.getByText("Status unknown")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Unlink acme/app #7" })).toHaveProperty(
+      "disabled",
+      permissionLevel < 2,
+    );
+    expect(screen.getByRole("button", { name: "Link a PR" })).toHaveProperty(
+      "disabled",
+      permissionLevel < 2,
+    );
+  });
+
+  it("offers linking with no workspace or PR", () => {
+    state.info!.data = { object: "session.github.info", available: false };
+    renderPanel(true);
+    fireEvent.click(screen.getByRole("button", { name: "Link a PR" }));
+    expect(screen.getByRole("textbox", { name: "Pull request URL" })).toBeVisible();
+  });
+
   it("shows the PR title in the header and CI check pills on the Summary tab", async () => {
     renderPanel();
     const heading = screen.getByRole("heading", { name: "GitHub" });
