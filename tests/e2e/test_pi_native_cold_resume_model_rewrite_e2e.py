@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import shutil
 import subprocess
@@ -15,6 +14,7 @@ import httpx
 import pytest
 import yaml
 
+from omnigent.harnesses.pi_native.bridge import bridge_dir_for_session_id
 from tests._helpers.session import bundle_files, post_session_bundle
 from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.e2e.helpers import POLL_INTERVAL_S
@@ -43,7 +43,8 @@ pytestmark = [
 
 
 def _bridge_digest(session_id: str) -> str:
-    return hashlib.sha256(session_id.encode()).hexdigest()[:32]
+    # The daemon's custom HOME moves the bridge root, not the per-session digest.
+    return bridge_dir_for_session_id(session_id).name
 
 
 def _bridge_dir(home: Path, session_id: str) -> Path:
@@ -181,14 +182,17 @@ def _seed_cold_resume_pi_home(home: Path) -> str:
                 _PI_OWN_PROVIDER: {
                     "models": [
                         {
-                            "id": _PI_MODEL_ID,
-                            "name": "GPT-5.6 Sol",
+                            "id": model_id,
+                            "name": name,
                             "api": "openai-responses",
                             "provider": _PI_OWN_PROVIDER,
                             "baseUrl": "https://chatgpt.com/backend-api/codex",
                             "input": ["text", "image"],
-                        },
-                        {"id": "picker-model"},
+                        }
+                        for model_id, name in (
+                            (_PI_MODEL_ID, "GPT-5.6 Sol"),
+                            ("gpt-5.5", "GPT-5.5"),
+                        )
                     ],
                     "checkedAt": 1750000000,
                 }
@@ -196,6 +200,25 @@ def _seed_cold_resume_pi_home(home: Path) -> str:
         )
     )
     return host_id
+
+
+def _wait_for_pushed_model_options(
+    client: httpx.Client, session_id: str, expected_id: str, timeout: float = 90.0
+) -> list[dict]:
+    """Poll the session until the relaunched Pi has published a catalog listing *expected_id*."""
+    deadline = time.monotonic() + timeout
+    options: list[dict] = []
+    while time.monotonic() < deadline:
+        resp = client.get(f"/v1/sessions/{session_id}", timeout=10.0)
+        if resp.status_code == 200:
+            options = resp.json().get("model_options") or []
+            if any(option.get("id") == expected_id for option in options):
+                return options
+        time.sleep(1.0)
+    raise AssertionError(
+        f"the relaunched Pi never published a model catalog listing {expected_id!r}; "
+        f"last model_options: {options}"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -319,7 +342,7 @@ def test_cold_resume_keeps_explicit_openai_codex_selection(
 
         # Hiding a saved model from the picker must not change its launch identity.
         (host.home / ".pi/agent/settings.json").write_text(
-            json.dumps({"enabledModels": [f"{_PI_OWN_PROVIDER}/picker-model"]})
+            json.dumps({"enabledModels": [f"{_PI_OWN_PROVIDER}/gpt-5.5"]})
         )
 
         ensured = http_client.post(
@@ -365,15 +388,25 @@ def test_cold_resume_keeps_explicit_openai_codex_selection(
         )
 
         models_config = _read_managed_models_config(bridge_dir)
-        if models_config is not None:
-            refs = _model_refs(models_config)
-            assert _MANGLED_MODEL_REF not in refs, (
-                "the managed model catalog registers the malformed "
-                f"{_MANGLED_MODEL_REF!r} entry, so the model picker collapses to "
-                f"it and the model cannot be changed from the UI. Pi's real "
-                f"{_EXPLICIT_SELECTION!r} selection must remain available. "
-                f"models.json refs: {refs}"
+        assert models_config is None, (
+            "the cold resume wrote a managed model catalog, so Pi runs on the "
+            "generated provider instead of its own login and the picker collapses "
+            f"to it. models.json refs: {_model_refs(models_config)}"
+        )
+        # The relaunched Pi publishes its live catalog to the session (what the
+        # web /model picker shows): the pick and Pi's other own-login models
+        # must be offered, with no managed omnigent/ entry.
+        option_ids = [
+            option.get("id")
+            for option in _wait_for_pushed_model_options(
+                http_client, session_id, _EXPLICIT_SELECTION
             )
+        ]
+        own_login_ids = [i for i in option_ids if str(i).startswith(f"{_PI_OWN_PROVIDER}/")]
+        assert set(own_login_ids) == {_EXPLICIT_SELECTION, f"{_PI_OWN_PROVIDER}/gpt-5.5"}, (
+            option_ids
+        )
+        assert not any(str(i).startswith("omnigent/") for i in option_ids), option_ids
     except Exception:
         _capture_pane_diagnostics(marker, host.home / "pi-pane-diagnostics.txt")
         raise

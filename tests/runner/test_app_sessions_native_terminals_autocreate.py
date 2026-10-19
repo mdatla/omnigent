@@ -75,6 +75,7 @@ from omnigent.runner.resource_registry import (
 from omnigent.runner.session_init_protocol import RunnerSessionInitEnvelope
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
+from tests._helpers.pi_native import seed_pi_own_login_catalog
 from tests.runner.conftest import (
     _FakeProcessManager,
     _runner_client,
@@ -5619,14 +5620,6 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     await fake_client.aclose()
 
 
-def _seed_pi_own_login_catalog(agent_dir: Path) -> None:
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "auth.json").write_text(json.dumps({"openai-codex": {"type": "oauth"}}))
-    (agent_dir / "models-store.json").write_text(
-        json.dumps({"openai-codex": {"models": [{"id": "gpt-5.6-sol"}]}})
-    )
-
-
 async def _launch_pi_terminal_args(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5712,7 +5705,7 @@ async def test_auto_create_pi_terminal_passes_pi_own_login_reference_through(
     monkeypatch: pytest.MonkeyPatch,
     model_source: str,
 ) -> None:
-    _seed_pi_own_login_catalog(tmp_path / "pi-own-login")
+    seed_pi_own_login_catalog(tmp_path / "pi-own-login", "openai-codex", ["gpt-5.6-sol"])
     selected = "openai-codex/gpt-5.6-sol"
     args = await _launch_pi_terminal_args(
         tmp_path,

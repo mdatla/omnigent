@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -19,6 +20,7 @@ import pytest
 from omnigent.harnesses.pi_native import auth_command
 from omnigent.harnesses.pi_native import credentials as creds
 from omnigent.inner._proc import process_alive
+from tests._helpers.pi_native import seed_pi_own_login_catalog
 
 
 @pytest.fixture(autouse=True)
@@ -753,16 +755,8 @@ def _openrouter_default_pi_config() -> dict[str, object]:
     }
 
 
-def _seed_pi_login_catalog(agent_dir: Path, provider_id: str, model_ids: list[str]) -> None:
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "auth.json").write_text(json.dumps({provider_id: {"type": "oauth"}}))
-    (agent_dir / "models-store.json").write_text(
-        json.dumps({provider_id: {"models": [{"id": model_id} for model_id in model_ids]}})
-    )
-
-
 def test_pi_own_login_reference_classification(tmp_path: Path) -> None:
-    _seed_pi_login_catalog(tmp_path, "openai-codex", ["gpt-5.6-sol"])
+    seed_pi_own_login_catalog(tmp_path, "openai-codex", ["gpt-5.6-sol"])
 
     assert creds.pi_own_login_serves_reference("openai-codex/gpt-5.6-sol", tmp_path)
     assert not creds.pi_own_login_serves_reference("anthropic/claude-opus-5", tmp_path)
@@ -775,7 +769,7 @@ def test_pi_own_login_reference_classification(tmp_path: Path) -> None:
 
 
 def test_pi_own_login_reference_matches_slash_bearing_model_id(tmp_path: Path) -> None:
-    _seed_pi_login_catalog(tmp_path, "openrouter", ["qwen/qwen3-coder"])
+    seed_pi_own_login_catalog(tmp_path, "openrouter", ["qwen/qwen3-coder"])
 
     assert creds.pi_own_login_serves_reference("openrouter/qwen/qwen3-coder", tmp_path)
     assert not creds.pi_own_login_serves_reference("openrouter/qwen", tmp_path)
@@ -805,7 +799,7 @@ def test_resolve_prefers_pi_own_login_for_served_reference(
             )
         )
     else:
-        _seed_pi_login_catalog(tmp_path, provider_id, [model_id, "picker-model"])
+        seed_pi_own_login_catalog(tmp_path, provider_id, [model_id, "picker-model"])
     if curated:
         (tmp_path / "settings.json").write_text(json.dumps({"enabledModels": [alternative]}))
         assert [o["id"] for o in creds.pi_own_login_model_options(tmp_path)] == [alternative]
@@ -831,10 +825,33 @@ def test_resolve_keeps_gateway_routing_for_unserved_slash_model(
     assert provider.model == "openai/gpt-4o-mini"
 
 
+def test_resolve_pi_own_login_collision_with_gateway_default_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A slash id served by both Pi's login and the gateway default goes to Pi's login.
+
+    ``openai/gpt-4o-mini`` is also an OpenRouter id, so the host login decides
+    the routing; the resolver must say so at WARNING level.
+    """
+    seed_pi_own_login_catalog(tmp_path, "openai", ["gpt-4o-mini"])
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
+
+    with caplog.at_level(logging.WARNING, logger="omnigent.harnesses.pi_native.credentials"):
+        provider = creds.resolve_pi_native_provider(
+            model="openai/gpt-4o-mini", config_loader=_openrouter_default_pi_config
+        )
+
+    assert provider is None
+    assert any(
+        rec.levelno == logging.WARNING and "openai/gpt-4o-mini" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
 def test_resolve_configured_provider_prefix_wins_over_pi_own_login(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _seed_pi_login_catalog(tmp_path, "openrouter", ["gpt-4o-mini"])
+    seed_pi_own_login_catalog(tmp_path, "openrouter", ["gpt-4o-mini"])
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
 
     provider = creds.resolve_pi_native_provider(
@@ -852,7 +869,7 @@ def test_resolve_managed_selection_stays_managed_despite_pi_own_login_collision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider_id: str, model_id: str
 ) -> None:
     """An explicit managed pick keeps managed routing even if Pi's login serves the same id."""
-    _seed_pi_login_catalog(tmp_path, provider_id, [model_id])
+    seed_pi_own_login_catalog(tmp_path, provider_id, [model_id])
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
 
     provider = creds.resolve_pi_native_provider(
@@ -2320,7 +2337,7 @@ def test_override_qualified_by_other_configured_provider_notifies(
     keeps precedence even when Pi's own login serves the same reference.
     """
     if pi_login_serves_reference:
-        _seed_pi_login_catalog(tmp_path, "other-gw", ["databricks-claude-fable-5-1"])
+        seed_pi_own_login_catalog(tmp_path, "other-gw", ["databricks-claude-fable-5-1"])
         monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
     config = _rpw_fable_anthropic_gateway()
     config["providers"]["other-gw"] = {
