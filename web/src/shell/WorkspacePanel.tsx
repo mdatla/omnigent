@@ -1,4 +1,4 @@
-import type { FilePosition } from "./FileViewerContext";
+import type { FilePosition, OpenFileOptions } from "./FileViewerContext";
 import {
   BotIcon,
   CheckIcon,
@@ -13,6 +13,7 @@ import {
   MessagesSquareIcon,
   MinimizeIcon,
   PlusIcon,
+  SearchIcon,
   TerminalIcon,
   XIcon,
 } from "lucide-react";
@@ -31,7 +32,14 @@ import {
   useState,
 } from "react";
 import { cn } from "@/lib/utils";
-import { ALT_KEY, CompactShortcutKeys, MOD_KEY } from "@/components/KeyboardShortcut";
+import {
+  ALT_KEY,
+  ARIA_MOD_KEY,
+  CompactShortcutKeys,
+  MOD_KEY,
+  SHIFT_KEY,
+} from "@/components/KeyboardShortcut";
+import { hasCommandModifier } from "@/lib/hotkeys";
 import { defaultWorkspaceTabs, readDefaultWorkspaceTab } from "@/lib/workspaceTabPreferences";
 import { isEditorLevel, isOwnerLevel } from "@/lib/permissionsApi";
 import {
@@ -64,6 +72,7 @@ import { SuppressBrowserView } from "@/hooks/useSuppressBrowserView";
 import { readPreferredShell, resolveDefaultShell, writePreferredShell } from "./preferredShell";
 import { WorkspaceTabsScroller } from "./WorkspaceTabsScroller";
 import { FilesPanel } from "./FilesPanel";
+import { ContentSearchPanel } from "./ContentSearchPanel";
 import { FileViewer } from "./FileViewer";
 import { ResponsiveViewerSlot } from "./ResponsiveViewerSlot";
 import { PullRequestPanel } from "./PullRequestPanel";
@@ -104,7 +113,7 @@ function WorkspaceTabTooltip({
   children,
 }: {
   label: string;
-  shortcut?: string;
+  shortcut?: string | readonly string[];
   className?: string;
   children: ReactElement;
 }) {
@@ -115,7 +124,7 @@ function WorkspaceTabTooltip({
       </TooltipTrigger>
       <TooltipContent
         side="bottom"
-        shortcut={shortcut ? [WORKSPACE_OPEN_KEYS, [shortcut]] : undefined}
+        shortcut={typeof shortcut === "string" ? [WORKSPACE_OPEN_KEYS, [shortcut]] : shortcut}
       >
         <span>{label}</span>
       </TooltipContent>
@@ -652,12 +661,13 @@ interface WorkspacePanelProps {
   onRightRailTabChange: (next: RightRailTab) => void;
   /** Whether the Files/Changes tabs are available (agent spec exposes an os_env). */
   showFilesPanel: boolean;
+  showContentSearch?: boolean;
   /** Whether the Pull Requests tab is available (same on-disk-workspace gate as Files). */
   showGithubTab: boolean;
   /** Whether Browser soft tabs are available — hidden without a browser bridge. */
   showBrowserTab: boolean;
-  /** Reveal the workspace after a Browser tab is opened by a global shortcut. */
-  onBrowserTabOpened?: () => void;
+  /** Reveal the workspace when a global shortcut opens a tab. */
+  onReveal?: () => void;
   /** Count of changed files, shown as the Changes tab badge. */
   changedCount: number;
   /** How many child agents are actively working (Agents tab badge). */
@@ -681,7 +691,7 @@ interface WorkspacePanelProps {
   /** Ordered list of open file tabs, shown as a strip in the Files panel. */
   openFiles: string[];
   /** Open a file in the inline viewer (adds/activates its tab). */
-  openFileViewer: (path: string) => void;
+  openFileViewer: (path: string, options?: OpenFileOptions) => void;
   /** Close a single open file tab by path. */
   onCloseFile: (path: string) => void;
   /** Deselect the active file tab to reveal the scope view (Changed/All). */
@@ -766,9 +776,10 @@ function WorkspacePanelImpl({
   tabListRef,
   onRightRailTabChange,
   showFilesPanel,
+  showContentSearch = false,
   showGithubTab,
   showBrowserTab,
-  onBrowserTabOpened,
+  onReveal,
   changedCount,
   subagentsWorking,
   agentCount,
@@ -801,6 +812,8 @@ function WorkspacePanelImpl({
   mobileSideChatsOpen = false,
   onMobileSideChatsOpenChange,
 }: WorkspacePanelProps) {
+  const contentSearchInputRef = useRef<HTMLInputElement>(null);
+  const [focusContentSearch, setFocusContentSearch] = useState(false);
   const browsers = useBrowserTabs(conversationId);
   const closeBrowserTab = async (tabId: string) => {
     const closed = await browsers.close(tabId);
@@ -818,7 +831,7 @@ function WorkspacePanelImpl({
   const addBrowser = () => {
     browsers.add();
     onRightRailTabChange("browser");
-    onBrowserTabOpened?.();
+    onReveal?.();
   };
   useNewBrowserHotkey(addBrowser, showBrowserTab && !pending);
 
@@ -940,6 +953,41 @@ function WorkspacePanelImpl({
   // The selected side chat's pane, shown in the rail or the mobile drawer. A
   // `pending:` tab has no child yet; its first send creates the fork.
   const isMobile = useIsMobileViewport();
+  useEffect(() => {
+    if (!showContentSearch || !showFilesPanel || pending || isMobile) return;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.code !== "KeyF" ||
+        !hasCommandModifier(event) ||
+        !event.shiftKey ||
+        event.altKey ||
+        event.repeat ||
+        event.isComposing
+      )
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      onRightRailTabChange("content-search");
+      onReveal?.();
+      setFocusContentSearch(true);
+    };
+    // Capture so workspace search also works from Monaco and terminal inputs.
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [showContentSearch, showFilesPanel, pending, isMobile, onRightRailTabChange, onReveal]);
+  useEffect(() => {
+    if (
+      !focusContentSearch ||
+      !open ||
+      inert ||
+      rightRailTab !== "content-search" ||
+      selectedFilePath !== null ||
+      selectedTerminalKey !== null
+    )
+      return;
+    contentSearchInputRef.current?.focus();
+    setFocusContentSearch(false);
+  }, [focusContentSearch, open, inert, rightRailTab, selectedFilePath, selectedTerminalKey]);
   const selectedSideChat = sideChats.selected;
   const selectedSideChatPane =
     selectedSideChat === null ? null : (
@@ -1015,7 +1063,11 @@ function WorkspacePanelImpl({
       }
     : handleProps;
   const defaultTab = readDefaultWorkspaceTab();
-  const tabOrder = [defaultTab, ...defaultWorkspaceTabs.filter((tab) => tab !== defaultTab)];
+  const tabOrder = [
+    defaultTab,
+    ...defaultWorkspaceTabs.filter((tab) => tab !== defaultTab),
+    ...(showContentSearch ? ["content-search" as const] : []),
+  ];
   const visiblePermanentTabs = tabOrder.filter((tab) => {
     if (tab === "subagents") return true;
     if (tab === "github") return pending || showGithubTab;
@@ -1075,6 +1127,7 @@ function WorkspacePanelImpl({
     changes: "Changes",
     github: "Pull Requests",
     subagents: "Agents",
+    "content-search": "Content search",
   };
   const panelOptions = [
     ...visiblePermanentTabs.map((tab) => ({
@@ -1125,6 +1178,25 @@ function WorkspacePanelImpl({
     })),
   ];
   const tabTriggers = {
+    "content-search": showContentSearch && showFilesPanel && (
+      <WorkspaceTabTooltip
+        key="content-search"
+        label="Content search"
+        shortcut={[MOD_KEY, SHIFT_KEY, "F"]}
+      >
+        <TabsTrigger
+          value="content-search"
+          aria-label="Content search"
+          aria-keyshortcuts={`${ARIA_MOD_KEY}+Shift+F ${shortcutFor("content-search") ?? ""}`.trim()}
+          data-workspace-tab="content-search"
+          disabled={pending}
+          className="size-6 shrink-0 p-0 hover:border-1 hover:border-muted rounded-md!"
+        >
+          <SearchIcon />
+          <span className="sr-only">Content search</span>
+        </TabsTrigger>
+      </WorkspaceTabTooltip>
+    ),
     files: (pending || showFilesPanel) && (
       <WorkspaceTabTooltip key="files" label="Files" shortcut={shortcutFor("files")}>
         <TabsTrigger
@@ -1494,6 +1566,25 @@ function WorkspacePanelImpl({
           (tree vs changed-only list); Subagents lists the root's children +
           a "main" link back to the parent. */}
         <div data-workspace-panel-content className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {showContentSearch && showFilesPanel && !pending && (
+            <div
+              className={cn(
+                "min-h-0 flex-1 flex-col",
+                rightRailTab === "content-search" &&
+                  selectedFilePath === null &&
+                  selectedTerminalKey === null
+                  ? "flex"
+                  : "hidden",
+              )}
+            >
+              <ContentSearchPanel
+                inputRef={contentSearchInputRef}
+                key={conversationId}
+                conversationId={conversationId}
+                onFileSelect={openFileViewer}
+              />
+            </div>
+          )}
           {pending ? (
             <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
               <Spinner />
@@ -1546,7 +1637,7 @@ function WorkspacePanelImpl({
             <PullRequestPanel conversationId={conversationId} />
           ) : rightRailTab === "subagents" && rootSessionId ? (
             <SubagentsPanel conversationId={conversationId} rootSessionId={rootSessionId} />
-          ) : (
+          ) : rightRailTab === "content-search" && showContentSearch ? null : (
             showFilesPanel && (
               <FilesPanel
                 frameless

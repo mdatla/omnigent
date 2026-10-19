@@ -554,7 +554,7 @@ export function FilesPanel({
                 aria-label="Search changed files"
                 className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                 onChange={(event) => setChangedSearch(event.target.value)}
-                placeholder="Search"
+                placeholder="Find changed files by name"
                 type="search"
                 value={changedSearch}
               />
@@ -578,7 +578,7 @@ export function FilesPanel({
                   aria-label="Search all files"
                   className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                   onChange={(event) => setTreeSearch(event.target.value)}
-                  placeholder="Search"
+                  placeholder="Find files by name"
                   type="search"
                   value={treeSearch}
                 />
