@@ -146,6 +146,7 @@ describe("HarnessFixDialog", () => {
       expect(props.onFixed).toHaveBeenCalledWith({
         configuredHarnesses: { "codex-native": true },
         credentialKind: "isaac",
+        gatewayInference: { "codex-native": true },
       }),
     );
     expect(showToast).toHaveBeenCalledWith("Codex is ready on Local laptop");
@@ -206,14 +207,33 @@ describe("HarnessFixDialog", () => {
     ).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Copy login command" }));
     expect(copyText).toHaveBeenCalledWith("claude auth login --claudeai");
+    expect(await screen.findByText("Copied")).toBeVisible();
+    expect(showToast).toHaveBeenCalledWith("Copied to clipboard.");
     await user.click(screen.getByRole("button", { name: "Check again" }));
 
     await waitFor(() =>
       expect(props.onFixed).toHaveBeenCalledWith({
         configuredHarnesses: { "claude-native": true },
         credentialKind: "personal",
+        gatewayInference: null,
       }),
     );
+  });
+
+  it("shows persistent guidance when copying a command fails", async () => {
+    vi.mocked(copyText).mockRejectedValueOnce(new Error("clipboard unavailable"));
+    renderDialog();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    await user.click(screen.getByRole("button", { name: "Copy omni setup" }));
+
+    await waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith("Couldn't copy — select and copy manually.", {
+        duration: 0,
+      }),
+    );
+    expect(screen.getByRole("button", { name: "Copy omni setup" })).toHaveTextContent("Copy");
   });
 
   it("keeps Codex open with an inline message when Check again is not ready", async () => {
@@ -243,20 +263,24 @@ describe("HarnessFixDialog", () => {
     expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
-  it("falls back to the hosts query when immediate refresh is unsupported", async () => {
+  it.each([
+    [
+      "unsupported",
+      {
+        error: {
+          code: "refresh_unsupported",
+          message: "This host cannot refresh harness readiness immediately.",
+        },
+      },
+      409,
+    ],
+    ["a gateway timeout", { detail: "host readiness refresh timed out" }, 504],
+  ])("falls back to the hosts query when immediate refresh is %s", async (_case, body, status) => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/v1/harnesses") return json(catalog);
       if (url.endsWith("/harnesses/refresh")) {
-        return json(
-          {
-            error: {
-              code: "refresh_unsupported",
-              message: "This host cannot refresh harness readiness immediately.",
-            },
-          },
-          { status: 409 },
-        );
+        return json(body, { status });
       }
       if (url === "/v1/hosts") {
         return json({
@@ -286,6 +310,35 @@ describe("HarnessFixDialog", () => {
       expect(props.onFixed).toHaveBeenCalledWith({
         configuredHarnesses: { "codex-native": true },
         credentialKind: "personal",
+        gatewayInference: { "codex-native": false },
+      }),
+    );
+  });
+
+  it("labels a gateway-backed refresh as Isaac even from the personal phase", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/harnesses/refresh")) {
+        return json({
+          configured_harnesses: { "codex-native": true },
+          gateway_inference: { "codex-native": true },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const props = renderDialog();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+
+    await waitFor(() =>
+      expect(props.onFixed).toHaveBeenCalledWith({
+        configuredHarnesses: { "codex-native": true },
+        credentialKind: "isaac",
+        gatewayInference: { "codex-native": true },
       }),
     );
   });
@@ -381,6 +434,7 @@ describe("HarnessFixDialog", () => {
     expect(props.onFixed).toHaveBeenCalledWith({
       configuredHarnesses: { "codex-native": true },
       credentialKind: "isaac",
+      gatewayInference: { "codex-native": true },
     });
   });
 

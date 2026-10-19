@@ -4911,7 +4911,7 @@ def test_handle_create_dir_expands_tilde(tmp_path: Path, monkeypatch) -> None:
 # ── host.install_harness handler ────────────────────────
 
 
-def test_handle_refresh_harnesses_bypasses_cache_and_returns_fresh_maps(
+async def test_handle_refresh_harnesses_bypasses_cache_and_returns_fresh_maps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A forced refresh invalidates login cache before the full re-probe."""
@@ -4943,6 +4943,38 @@ def test_handle_refresh_harnesses_bypasses_cache_and_returns_fresh_maps(
     assert result.configured_harnesses == {"codex-native": True}
     assert result.gateway_inference == {"codex-native": False}
     assert calls == ["invalidate", "configured", "gateway"]
+
+
+async def test_dispatch_refresh_harnesses_uses_guard_and_updates_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refresh dispatch guards its probes, publishes the result, and updates readiness."""
+    host = _make_host_process()
+    request = HostRefreshHarnessesFrame(request_id="refresh-dispatch-1")
+    result = HostRefreshHarnessesResultFrame(
+        request_id=request.request_id,
+        status="ok",
+        configured_harnesses={"codex-native": True},
+        gateway_inference={"codex-native": False},
+    )
+    guarded: list[Callable[[], HostRefreshHarnessesResultFrame]] = []
+
+    async def _guard(
+        operation: Callable[[], HostRefreshHarnessesResultFrame],
+    ) -> HostRefreshHarnessesResultFrame:
+        guarded.append(operation)
+        return operation()
+
+    monkeypatch.setattr(host, "_run_host_subprocess_in_thread", _guard)
+    monkeypatch.setattr(host, "_handle_refresh_harnesses", lambda frame: result)
+    tunnel = _FakeTunnel()
+
+    await host._dispatch_host_frame(tunnel, request)  # type: ignore[arg-type]
+
+    assert len(guarded) == 1
+    assert decode_host_frame(tunnel.sent[0]) == result
+    assert host._configured_harnesses == {"codex-native": True}
+    assert host._gateway_inference == {"codex-native": False}
 
 
 def test_handle_install_harness_success_returns_refreshed_readiness(

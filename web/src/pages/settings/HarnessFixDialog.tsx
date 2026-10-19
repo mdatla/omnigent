@@ -14,27 +14,33 @@ import {
 import { showToast } from "@/components/ui/toast";
 import {
   fetchHosts,
-  installHarnessOnHost,
   refreshHarnessesOnHost,
+  useInstallHarness,
   type Host,
   type StoreCredentialResult,
 } from "@/hooks/useHosts";
 import { useHarnessSetupSteps } from "@/lib/agentLabels";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { copyText } from "@/lib/clipboard";
-import { harnessAuthableOnHost, harnessCredentialFamily, isCodexHarness } from "@/lib/harnessSetup";
+import {
+  HARNESS_CREDENTIAL_COPY,
+  harnessAuthableOnHost,
+  harnessCredentialFamily,
+  isCodexHarness,
+  type HarnessCredentialKind,
+} from "@/lib/harnessSetup";
 import { canonicalNativeHarness } from "@/lib/nativeHarnessModes";
 import { ApiError } from "@/lib/sessionsApi";
 import { cn } from "@/lib/utils";
 import { HarnessCredentialForm } from "@/shell/HarnessCredentialForm";
 
 export type HarnessFixMode = "reconfigure" | "update" | "install";
-export type HarnessCredentialKind = "isaac" | "personal";
 
 export interface HarnessFixResult {
   configuredHarnesses: Record<string, boolean | string>;
   credentialKind?: HarnessCredentialKind;
   version?: string;
+  gatewayInference?: Record<string, boolean> | null;
 }
 
 export interface HarnessFixDialogProps {
@@ -47,7 +53,6 @@ export interface HarnessFixDialogProps {
   onFixed: (result: HarnessFixResult) => void;
 }
 
-type CredentialChoice = "isaac" | "personal";
 type Phase =
   "install" | "choose" | "progress" | "isaac" | "personal" | "credentials" | "setup" | "error";
 
@@ -56,6 +61,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const hostId = host.host_id;
   const hostName = host.name;
   const queryClient = useQueryClient();
+  const { mutateAsync: installHarness } = useInstallHarness(hostId);
   const info = useServerInfo();
   const setupSteps = useHarnessSetupSteps();
   const canonicalHarness = canonicalNativeHarness(harness);
@@ -83,9 +89,11 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
           : "setup";
 
   const [phase, setPhase] = useState<Phase>(initialPhase);
-  const [choice, setChoice] = useState<CredentialChoice>(isaacSupported ? "isaac" : "personal");
+  const [choice, setChoice] = useState<HarnessCredentialKind>(
+    isaacSupported ? "isaac" : "personal",
+  );
   const [error, setError] = useState("");
-  const [stillNotSignedIn, setStillNotSignedIn] = useState(false);
+  const [stillNotReady, setStillNotReady] = useState(false);
   const [updatedNeedsSetup, setUpdatedNeedsSetup] = useState(false);
   const [checking, setChecking] = useState(false);
   const runId = useRef(0);
@@ -96,11 +104,13 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       credentialKind?: HarnessCredentialKind,
       version?: string | null,
       announce = true,
+      gatewayInference?: Record<string, boolean> | null,
     ) => {
       onFixed({
         configuredHarnesses,
         credentialKind,
         ...(version ? { version } : {}),
+        ...(gatewayInference !== undefined ? { gatewayInference } : {}),
       });
       if (announce) {
         showToast(`${harnessLabel}${version ? ` ${version}` : ""} is ready on ${hostName}`);
@@ -116,8 +126,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     setPhase("error");
   }, []);
 
-  const authenticate = useCallback((selected: CredentialChoice) => {
-    setStillNotSignedIn(false);
+  const authenticate = useCallback((selected: HarnessCredentialKind) => {
+    setStillNotReady(false);
     setPhase(selected);
   }, []);
 
@@ -129,11 +139,11 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const start = useCallback(async () => {
     const id = ++runId.current;
     setError("");
-    setStillNotSignedIn(false);
+    setStillNotReady(false);
     setUpdatedNeedsSetup(false);
     setPhase("progress");
     try {
-      const result = await installHarnessOnHost(hostId, harness);
+      const result = await installHarness(harness);
       if (runId.current !== id) return;
       if (result.configured_harnesses[harness] === true) {
         finish(result.configured_harnesses, undefined, result.version);
@@ -145,7 +155,17 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     } catch (reason) {
       fail(reason, id);
     }
-  }, [authenticate, choice, fail, finish, harness, hasCredentialCards, hostId, mode, needsSetup]);
+  }, [
+    authenticate,
+    choice,
+    fail,
+    finish,
+    harness,
+    hasCredentialCards,
+    installHarness,
+    mode,
+    needsSetup,
+  ]);
   const startRef = useRef(start);
   startRef.current = start;
 
@@ -154,7 +174,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     runId.current += 1;
     setChoice(isaacSupported ? "isaac" : "personal");
     setError("");
-    setStillNotSignedIn(false);
+    setStillNotReady(false);
     setUpdatedNeedsSetup(false);
     setChecking(false);
     setPhase(initialPhase);
@@ -172,7 +192,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const retry = () => {
     runId.current += 1;
     setError("");
-    setStillNotSignedIn(false);
+    setStillNotReady(false);
     setUpdatedNeedsSetup(false);
     setPhase(initialPhase);
     if (mode === "update") void start();
@@ -197,7 +217,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     if (checking) return;
     const id = ++runId.current;
     setChecking(true);
-    setStillNotSignedIn(false);
+    setStillNotReady(false);
     try {
       let result;
       try {
@@ -214,15 +234,22 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       }
       if (runId.current !== id) return;
       if (result.configured_harnesses[harness] === true) {
-        const credentialKind: HarnessCredentialKind | undefined =
-          phase === "isaac" && result.gateway_inference?.[harness]
-            ? "isaac"
-            : phase === "personal"
-              ? "personal"
-              : undefined;
-        finish(result.configured_harnesses, credentialKind);
+        const credentialKind: HarnessCredentialKind | undefined = result.gateway_inference?.[
+          harness
+        ]
+          ? "isaac"
+          : phase === "personal"
+            ? "personal"
+            : undefined;
+        finish(
+          result.configured_harnesses,
+          credentialKind,
+          undefined,
+          true,
+          result.gateway_inference,
+        );
       } else {
-        setStillNotSignedIn(true);
+        setStillNotReady(true);
       }
     } catch (reason) {
       fail(reason, id);
@@ -270,13 +297,13 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
               command={loginCommand}
               harness={harness}
               hostName={hostName}
-              stillNotSignedIn={stillNotSignedIn}
+              stillNotReady={stillNotReady}
             />
           ) : phase === "isaac" ? (
             <IsaacCommand
               harnessLabel={harnessLabel}
               hostName={hostName}
-              stillNotSignedIn={stillNotSignedIn}
+              stillNotReady={stillNotReady}
             />
           ) : phase === "credentials" ? (
             <CredentialForms
@@ -290,7 +317,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
             <SetupCommand
               harnessLabel={harnessLabel}
               hostName={hostName}
-              stillNotSignedIn={stillNotSignedIn}
+              stillNotReady={stillNotReady}
             />
           ) : (
             <ProgressState mode={mode} hostName={hostName} harnessLabel={harnessLabel} />
@@ -362,8 +389,8 @@ function ChooseCredential({
   canUseCredentialForm,
   onUseCredentialForm,
 }: {
-  choice: CredentialChoice;
-  onChoice: (choice: CredentialChoice) => void;
+  choice: HarnessCredentialKind;
+  onChoice: (choice: HarnessCredentialKind) => void;
   hostName: string;
   harnessLabel: string;
   isaacSupported: boolean;
@@ -380,16 +407,16 @@ function ChooseCredential({
         {isaacSupported && (
           <CredentialCard
             selected={choice === "isaac"}
-            title="Isaac"
-            description="Databricks-managed credential via the Unity Gateway"
+            title={HARNESS_CREDENTIAL_COPY.isaac.label}
+            description={HARNESS_CREDENTIAL_COPY.isaac.description}
             onClick={() => onChoice("isaac")}
           />
         )}
         {personalSupported && (
           <CredentialCard
             selected={choice === "personal"}
-            title="Personal subscription"
-            description="Your own plan (e.g. Claude Pro/Max, ChatGPT Plus)"
+            title={HARNESS_CREDENTIAL_COPY.personal.label}
+            description={HARNESS_CREDENTIAL_COPY.personal.description}
             onClick={() => onChoice("personal")}
           />
         )}
@@ -483,12 +510,12 @@ function PersonalCommand({
   command,
   harness,
   hostName,
-  stillNotSignedIn,
+  stillNotReady,
 }: {
   command: string;
   harness: string;
   hostName: string;
-  stillNotSignedIn: boolean;
+  stillNotReady: boolean;
 }) {
   return (
     <>
@@ -499,7 +526,7 @@ function PersonalCommand({
           ? "Open the link it prints, then paste the code from your browser back into the terminal."
           : "Open the link it prints and enter the one-time code."}
       </p>
-      {stillNotSignedIn && (
+      {stillNotReady && (
         <p role="status" className="text-sm text-destructive">
           Still not signed in on {hostName}.
         </p>
@@ -511,11 +538,11 @@ function PersonalCommand({
 function IsaacCommand({
   harnessLabel,
   hostName,
-  stillNotSignedIn,
+  stillNotReady,
 }: {
   harnessLabel: string;
   hostName: string;
-  stillNotSignedIn: boolean;
+  stillNotReady: boolean;
 }) {
   return (
     <>
@@ -524,7 +551,7 @@ function IsaacCommand({
       <p className="text-sm text-muted-foreground">
         Choose {harnessLabel}, then the Databricks Unity Gateway credential.
       </p>
-      {stillNotSignedIn && (
+      {stillNotReady && (
         <p role="status" className="text-sm text-destructive">
           Still not signed in on {hostName}.
         </p>
@@ -536,11 +563,11 @@ function IsaacCommand({
 function SetupCommand({
   harnessLabel,
   hostName,
-  stillNotSignedIn,
+  stillNotReady,
 }: {
   harnessLabel: string;
   hostName: string;
-  stillNotSignedIn: boolean;
+  stillNotReady: boolean;
 }) {
   return (
     <>
@@ -549,7 +576,7 @@ function SetupCommand({
         setting up {harnessLabel}.
       </DialogDescription>
       <CommandRow command="omni setup" label="Copy omni setup" />
-      {stillNotSignedIn && (
+      {stillNotReady && (
         <p role="status" className="text-sm text-destructive">
           {harnessLabel} still isn’t ready on {hostName}.
         </p>
@@ -625,12 +652,25 @@ function ErrorState({ error, hostName }: { error: string; hostName: string }) {
 }
 
 function CommandRow({ command, label }: { command: string; label: string }) {
+  const [copied, setCopied] = useState(false);
   return (
     <div className="flex min-h-9 items-center gap-2 rounded-[10px] border border-border px-3 py-1.5">
       <code className="min-w-0 flex-1 break-all font-mono text-sm text-foreground">{command}</code>
-      <Button variant="ghost" size="sm" onClick={() => void copyText(command)} aria-label={label}>
-        <CopyIcon className="size-3.5" />
-        Copy
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => {
+          void copyText(command)
+            .then(() => {
+              setCopied(true);
+              showToast("Copied to clipboard.");
+            })
+            .catch(() => showToast("Couldn't copy — select and copy manually.", { duration: 0 }));
+        }}
+        aria-label={label}
+      >
+        {copied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
+        {copied ? "Copied" : "Copy"}
       </Button>
     </div>
   );

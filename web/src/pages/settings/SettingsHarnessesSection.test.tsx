@@ -164,6 +164,7 @@ vi.mock("./HarnessFixDialog", () => ({
     onFixed: (result: {
       configuredHarnesses: Record<string, boolean | string>;
       credentialKind?: "isaac" | "personal";
+      gatewayInference?: Record<string, boolean> | null;
     }) => void;
   }) => {
     fixDialogProps(props);
@@ -180,6 +181,7 @@ vi.mock("./HarnessFixDialog", () => ({
             props.onFixed({
               configuredHarnesses: { [props.harness]: true },
               credentialKind: "isaac",
+              gatewayInference: { [props.harness]: true },
             })
           }
         >
@@ -274,6 +276,7 @@ describe("Harnesses grid", () => {
     expect(dialog.getAttribute("data-host")).toBe("h1");
     expect(dialog.getAttribute("data-mode")).toBe("install");
     expect(within(card("codex-native")).queryByText("Needs reconfiguration")).toBeNull();
+    expect(within(card("codex-native")).getByText("Not installed")).toBeTruthy();
   });
 
   it("uses the existing inventory label instead of guessing a personal subscription", () => {
@@ -303,7 +306,9 @@ describe("Harnesses grid", () => {
     hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "binary-missing" } }];
     renderHarnesses();
 
-    expect(screen.getByLabelText("Needs reconfiguration: Not installed")).toBeTruthy();
+    expect(within(card("codex-native")).getByText("Binary missing")).toBeTruthy();
+    expect(within(card("codex-native")).queryByText("Not installed")).toBeNull();
+    expect(within(card("codex-native")).queryByLabelText(/Needs reconfiguration/)).toBeNull();
     expect(screen.queryByTestId("harness-action-codex-native")).toBeNull();
     expect(screen.queryByTestId("harness-settings-codex-native")).toBeNull();
   });
@@ -489,6 +494,17 @@ describe("Harness details", () => {
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "update");
   });
 
+  it.each([
+    ["binary-missing", "Not installed"],
+    [false, "Not configured"],
+  ])("never calls an install state %s reconfiguration", (reason, label) => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": reason } }];
+    renderHarnesses("codex-native");
+
+    expect(screen.getAllByText(label)).toHaveLength(2);
+    expect(screen.queryByText("Needs reconfiguration")).toBeNull();
+  });
+
   it("uses dedicated recovery copy for a readiness error", () => {
     hosts = [{ ...ONLINE, configured_harnesses: { "codex-native": "readiness-error" } }];
     renderHarnesses("codex-native");
@@ -513,6 +529,9 @@ describe("Harness details", () => {
     expect(screen.queryByRole("button", { name: "Reconfigure" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Reconfigure credential" })).toBeNull();
     expect(queryClient.getQueryData<Host[]>(hostsKey)?.[0].configured_harnesses).toEqual({
+      "codex-native": true,
+    });
+    expect(queryClient.getQueryData<Host[]>(hostsKey)?.[0].gateway_inference).toEqual({
       "codex-native": true,
     });
   });

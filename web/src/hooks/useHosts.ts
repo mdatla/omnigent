@@ -177,6 +177,7 @@ export interface InstallHarnessResult {
   harness: string;
   configured_harnesses: Record<string, boolean | string>;
   version: string | null;
+  gateway_inference: Record<string, boolean> | null;
 }
 
 async function responseDetail(res: Response): Promise<string> {
@@ -213,7 +214,7 @@ export async function installHarnessOnHost(
     `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/install`,
     { method: "POST" },
   );
-  if (!res.ok) throw new Error(await responseDetail(res));
+  if (!res.ok) throw await apiErrorFromResponse(res);
   return (await res.json()) as InstallHarnessResult;
 }
 
@@ -255,7 +256,13 @@ export function useInstallHarness(hostId: string) {
       // observer's per-call callbacks, which the later mutate() overwrites.
       queryClient.setQueriesData<Host[]>({ queryKey: ["hosts"] }, (hosts) =>
         hosts?.map((h) =>
-          h.host_id === hostId ? { ...h, configured_harnesses: result.configured_harnesses } : h,
+          h.host_id === hostId
+            ? {
+                ...h,
+                configured_harnesses: result.configured_harnesses,
+                gateway_inference: result.gateway_inference,
+              }
+            : h,
         ),
       );
     },

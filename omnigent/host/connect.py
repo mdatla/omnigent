@@ -5041,7 +5041,9 @@ class HostProcess:
         elif isinstance(frame, HostInstallHarnessFrame):
             # The installer shells out (npm) and can run for minutes, so run
             # it off the event loop and reply when it completes.
-            install_result = await asyncio.to_thread(self._handle_install_harness, frame)
+            install_result = await self._run_host_subprocess_in_thread(
+                lambda: self._handle_install_harness(frame)
+            )
             if install_result.status == "ok":
                 self._replace_capabilities(
                     install_result.configured_harnesses,
@@ -5049,7 +5051,9 @@ class HostProcess:
                 )
             await self._send_text(ws, encode_host_frame(install_result))
         elif isinstance(frame, HostRefreshHarnessesFrame):
-            refresh_result = await asyncio.to_thread(self._handle_refresh_harnesses, frame)
+            refresh_result = await self._run_host_subprocess_in_thread(
+                lambda: self._handle_refresh_harnesses(frame)
+            )
             if refresh_result.status == "ok":
                 self._replace_capabilities(
                     refresh_result.configured_harnesses,

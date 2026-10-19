@@ -522,6 +522,31 @@ async def test_refresh_harnesses_returns_fresh_host_maps(
     }
 
 
+async def test_refresh_harnesses_failed_host_result_returns_502(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    app, _registry, _comm, replies, _drain = install_setup
+    replies["__refresh__"] = {
+        "status": "failed",
+        "error": "readiness refresh failed: probe exited",
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/refresh")
+
+    assert resp.status_code == 502
+    assert (
+        resp.json()["detail"]
+        == "host readiness refresh failed: readiness refresh failed: probe exited"
+    )
+
+
 async def test_refresh_harnesses_route_hidden_when_flag_off(
     install_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
 ) -> None:
