@@ -483,6 +483,10 @@ def _pi_own_login_models(root: Path) -> list[ScopableModel]:
     for provider_id, payload in catalogs:
         if not _is_str_object_dict(payload):
             continue
+        if provider_id in _PI_MANAGED_PROVIDER_IDS:
+            # pi_own_login_model_arg() strips these ids as a stale managed pick,
+            # so the launch could not address such a row.
+            continue
         models = payload.get("models")
         for model in models if isinstance(models, list) else []:
             if not _is_str_object_dict(model):
