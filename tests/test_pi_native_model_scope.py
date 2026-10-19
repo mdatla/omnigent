@@ -1,10 +1,19 @@
-"""Tests for omnigent.harnesses.pi_native.model_scope (Pi enabledModels mirror)."""
+"""Catalog-only process checks against the installed Pi model resolver."""
 
 from __future__ import annotations
 
+import os
+import shutil
 import time
 
+import pytest
+
 from omnigent.harnesses.pi_native.model_scope import ScopableModel, scope_models
+
+pytestmark = pytest.mark.skipif(
+    shutil.which(os.environ.get("OMNIGENT_PI_PATH", "pi")) is None or shutil.which("node") is None,
+    reason="requires the installed Pi resolver and Node",
+)
 
 _SONNET = ScopableModel("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5")
 _OPUS = ScopableModel("anthropic", "claude-opus-4-6", "Claude Opus 4.6")
@@ -22,7 +31,7 @@ def test_exact_reference_selects_one_model() -> None:
 
 
 def test_exact_reference_is_case_insensitive() -> None:
-    """Pi matches references case-insensitively; the mirror must too."""
+    """Pi matches references case-insensitively; the pre-launch catalog must too."""
     assert scope_models(["Anthropic/Claude-Sonnet-4-5"], _CATALOG) == [_SONNET]
 
 
@@ -116,18 +125,10 @@ def test_invalid_class_pattern_keeps_other_patterns_selecting() -> None:
 
 
 def test_wildcard_heavy_patterns_resolve_without_backtracking_blowup() -> None:
-    """Adjacent/interleaved wildcards must not backtrack catastrophically.
-
-    ``********X`` against a long id used to hang the naive translation
-    (each ``*`` compiled to an independent ``[^/]*``). Wall-clock bound: the
-    hardened translation resolves these in microseconds; well under a second
-    even on a loaded machine, versus effectively-forever before.
-    """
+    """A bounded resolver process cannot hang host model discovery."""
     long_id_catalog = [*_CATALOG, ScopableModel("openai", "a" * 80, "long id")]
     start = time.perf_counter()
-    assert scope_models(["*" * 8 + "X"], long_id_catalog) == []
-    assert scope_models(["*?" * 8 + "X"], long_id_catalog) == []
-    assert scope_models(["*a*a*a*a*a*a*X"], long_id_catalog) == []
+    assert scope_models(["*" * 8 + "X", "*?" * 8 + "X", "*a*a*a*a*a*a*X"], long_id_catalog) == []
     assert time.perf_counter() - start < 5.0
 
 
@@ -135,3 +136,16 @@ def test_wildcard_runs_still_match_like_single_stars() -> None:
     """Collapsed ``*`` runs keep single-star semantics."""
     assert scope_models(["anthropic/claude-s***5"], _CATALOG) == [_SONNET]
     assert scope_models(["anthropic/claude-[!o]*"], _CATALOG) == [_SONNET]
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "anthropic/claude-{sonnet,opus}-*",
+        "anthropic/claude-@(sonnet|opus)-*",
+        "anthropic/claude-{sonnet,opus}-*:high",
+    ],
+)
+def test_upstream_glob_syntax_keeps_picker_in_scope(pattern: str) -> None:
+    """Pi's glob grammar reaches pre-launch curation without a Python translation."""
+    assert scope_models([pattern], _CATALOG) == [_SONNET, _OPUS, _DATED_OPUS]
