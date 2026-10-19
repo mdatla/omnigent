@@ -77,6 +77,8 @@ _WORKTREE = Path(__file__).resolve().parents[2]
 # Pi's Ctrl+P picker cycles exactly this; the Omnigent pickers must not offer
 # a thousand-row union around it.
 _ENABLED_MODEL = "anthropic/claude-sonnet-4-5"
+# Brace syntax must mean the same thing in the host resolver and the running CLI.
+_ENABLED_PATTERN = "anthropic/claude-{sonnet-4-5,not-an-installed-model}*"
 
 # Shape of a real openrouter login's multi-vendor models-store.json catalog.
 _OPENROUTER_VENDORS: list[tuple[str, str]] = [
@@ -223,7 +225,7 @@ def _seed_multi_login_pi_home(home: Path) -> str:
     )
     # settings.json enabledModels is Pi's own curation; both Omnigent pickers
     # must honor it (as Pi's Ctrl+P cycling does).
-    (pi_agent / "settings.json").write_text(json.dumps({"enabledModels": [_ENABLED_MODEL]}))
+    (pi_agent / "settings.json").write_text(json.dumps({"enabledModels": [_ENABLED_PATTERN]}))
     return host_id
 
 
@@ -328,6 +330,7 @@ def test_prelaunch_model_options_honor_pis_enabled_models(
         f"enabled Pi model {_ENABLED_MODEL!r} — a correct fix scopes the "
         f"catalog, not empties it. Got: {ids[:10]}"
     )
+    assert ids == [_ENABLED_MODEL]
     offenders = _openrouter_offenders(ids)
     assert not offenders, (
         f"pre-launch pi-native model-options ignores pi's enabledModels "
@@ -432,6 +435,7 @@ def test_in_session_picker_honors_pis_enabled_models(
             f"model {_ENABLED_MODEL!r} — a correct fix scopes the catalog, not "
             f"empties it. Got {len(ids)} options: {ids[:10]}"
         )
+        assert ids == [_ENABLED_MODEL]
         offenders = _openrouter_offenders(ids)
         assert not offenders, (
             f"the in-session Model picker ignores pi's enabledModels "

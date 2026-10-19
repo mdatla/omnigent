@@ -1,49 +1,26 @@
-"""Mirror of Pi's own model-scope resolution (``settings.json`` ``enabledModels``).
-
-Pi curates the models its pickers cycle with ``enabledModels`` patterns,
-resolved by its ``resolveModelScopeFromModels``. Catalogs Omnigent builds for
-Pi (the pre-launch own-login picker) must apply the same curation, or they
-offer models the launched Pi would never use. This module mirrors the
-resolver's observable semantics:
-
-- exact references: canonical ``provider/id``, then ``provider`` + ``id``
-  split at the first slash, then a bare ``id`` when unambiguous across
-  providers (all case-insensitive);
-- glob patterns (``*``/``?``/``[...]``): matched minimatch-style against the
-  qualified ``provider/id`` or the bare ``id`` — ``*``/``?`` do not cross
-  ``/``, a whole ``**`` segment does;
-- non-glob fallback: substring match on id or display name, picking one model
-  and preferring alias ids (no ``-YYYYMMDD`` suffix) over dated versions;
-- an optional trailing ``:<thinking level>`` suffix, which scopes the model
-  but is ignored here (Omnigent pickers carry no thinking level).
-
-Patterns that match nothing select nothing; Pi treats an entirely unmatched
-scope as "no curation", so callers should fall back to the unscoped catalog
-when the result is empty. Like minimatch, a character class the regex engine
-rejects (e.g. a reversed range ``[z-a]``) makes its pattern match nothing
-rather than raise. Brace expansion and backslash escapes inside ``[...]`` are
-not mirrored; model-id ``enabledModels`` patterns do not use them in practice.
-
-Mirrors Pi's ``resolveModelScopeFromModels`` (``core/model-resolver.js``,
-minimatch 10); re-check compatibility when the pinned Pi version in
-``.github/ci-deps`` changes.
-"""
+"""Resolve picker curation with the installed Pi CLI's own model resolver."""
 
 from __future__ import annotations
 
-import re
+import json
+import logging
+import shutil
+import subprocess
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib.resources import files
+from pathlib import Path
 
-# Pi's VALID_THINKING_LEVELS: a trailing ":<level>" scopes a model at that
-# thinking level and must be stripped before matching.
-_THINKING_LEVELS = frozenset({"off", "minimal", "low", "medium", "high", "xhigh", "max"})
-_GLOB_CHARS = ("*", "?", "[")
+from omnigent._platform import resolve_cli_binary
+from omnigent.harness_startup_config import resolve_harness_path
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class ScopableModel:
-    """One catalog entry the scope patterns are resolved against."""
+    """One available model, without credentials or provider configuration."""
 
     provider: str
     model_id: str
@@ -51,213 +28,85 @@ class ScopableModel:
 
     @property
     def reference(self) -> str:
-        """The canonical ``provider/id`` reference."""
+        """The canonical provider/model reference."""
         return f"{self.provider}/{self.model_id}"
 
 
 def scope_models(patterns: Iterable[str], models: Sequence[ScopableModel]) -> list[ScopableModel]:
-    """Resolve *patterns* against *models*, Pi's ``resolveModelScopeFromModels``.
+    """Use Pi's resolver without loading user extensions or accessing providers.
 
-    :param patterns: ``enabledModels`` entries from Pi's settings.
-    :param models: The available catalog to scope.
-    :returns: The selected models, deduplicated, in first-match order. Empty
-        when no pattern matched anything (Pi then treats the scope as unset).
+    :param patterns: Pi's enabledModels settings.
+    :param models: Available catalog entries, in Pi's discovery order.
+    :returns: Selected entries, or an empty scope when unmatched/unavailable.
+        Callers retain Pi's full-catalog fallback for an empty scope.
     """
-    scoped: list[ScopableModel] = []
-    seen: set[tuple[str, str]] = set()
-    for pattern in patterns:
-        for model in _match_pattern(pattern.strip(), models):
-            key = (model.provider.lower(), model.model_id.lower())
-            if key not in seen:
-                seen.add(key)
-                scoped.append(model)
-    return scoped
-
-
-def _match_pattern(pattern: str, models: Sequence[ScopableModel]) -> list[ScopableModel]:
-    """Return the models one pattern selects (many for globs, at most one else)."""
-    if not pattern:
+    if not models:
         return []
-    if any(char in pattern for char in _GLOB_CHARS):
-        glob = _strip_thinking_suffix(pattern)
-        exact = _exact_reference_match(glob, models)
-        if exact is not None:
-            return [exact]
-        regex = _glob_regex(glob)
-        if regex is None:
-            return []
-        return [
-            model
-            for model in models
-            if regex.fullmatch(model.reference) or regex.fullmatch(model.model_id)
-        ]
-    return _parse_model_pattern(pattern, models)
-
-
-def _strip_thinking_suffix(pattern: str) -> str:
-    """Drop a trailing ``:<valid thinking level>`` (kept otherwise)."""
-    colon = pattern.rfind(":")
-    if colon != -1 and pattern[colon + 1 :] in _THINKING_LEVELS:
-        return pattern[:colon]
-    return pattern
-
-
-def _parse_model_pattern(pattern: str, models: Sequence[ScopableModel]) -> list[ScopableModel]:
-    """Pi's ``parseModelPattern``: match, else retry the pre-colon prefix."""
-    match = _try_match_model(pattern, models)
-    if match is not None:
-        return [match]
-    colon = pattern.rfind(":")
-    if colon == -1:
+    executable = resolve_cli_binary(resolve_harness_path("pi-native") or "pi")
+    node = shutil.which("node")
+    if executable is None or node is None:
+        _LOGGER.warning("Pi model curation unavailable: Pi and Node must be installed")
         return []
-    # Pi retries the prefix whether the suffix is a valid thinking level or
-    # not (scope mode allows the invalid-suffix fallback, with a warning).
-    return _parse_model_pattern(pattern[:colon], models)
-
-
-def _try_match_model(pattern: str, models: Sequence[ScopableModel]) -> ScopableModel | None:
-    """Exact reference match, else substring match preferring alias ids."""
-    exact = _exact_reference_match(pattern, models)
-    if exact is not None:
-        return exact
-    needle = pattern.lower()
-    matches = [
-        model
-        for model in models
-        if needle in model.model_id.lower() or (model.name and needle in model.name.lower())
-    ]
-    if not matches:
-        return None
-    aliases = [model for model in matches if _is_alias(model.model_id)]
-    pool = aliases or matches
-    return max(pool, key=lambda model: model.model_id)
-
-
-def _exact_reference_match(
-    reference: str, models: Sequence[ScopableModel]
-) -> ScopableModel | None:
-    """Pi's ``findExactModelReferenceMatch``: unique exact matches only."""
-    trimmed = reference.strip()
-    if not trimmed:
-        return None
-    normalized = trimmed.lower()
-    canonical = [model for model in models if model.reference.lower() == normalized]
-    if len(canonical) == 1:
-        return canonical[0]
-    if len(canonical) > 1:
-        return None
-    slash = trimmed.find("/")
-    if slash != -1:
-        provider = trimmed[:slash].strip().lower()
-        model_id = trimmed[slash + 1 :].strip().lower()
-        if provider and model_id:
-            split_matches = [
-                model
-                for model in models
-                if model.provider.lower() == provider and model.model_id.lower() == model_id
-            ]
-            if len(split_matches) == 1:
-                return split_matches[0]
-            if len(split_matches) > 1:
-                return None
-    bare = [model for model in models if model.model_id.lower() == normalized]
-    return bare[0] if len(bare) == 1 else None
-
-
-def _is_alias(model_id: str) -> bool:
-    """An alias id has no ``-YYYYMMDD`` date suffix (or ends in ``-latest``)."""
-    if model_id.endswith("-latest"):
-        return True
-    return re.search(r"-\d{8}$", model_id) is None
-
-
-def _glob_regex(pattern: str) -> re.Pattern[str] | None:
-    """Compile a minimatch-style glob: ``*``/``?`` stay within one ``/`` segment.
-
-    :returns: The compiled pattern, or ``None`` when it cannot match anything
-        (minimatch resolves patterns its regex engine rejects to no matches).
-    """
-    segments = pattern.split("/")
-    parts: list[str] = []
-    for index, segment in enumerate(segments):
-        last = index == len(segments) - 1
-        if segment == "**":
-            # A whole ** segment spans any number of segments (including none).
-            parts.append("(?:[^/]+(?:/[^/]+)*)?" if last else "(?:[^/]+/)*")
-            continue
-        parts.append(_segment_regex(segment))
-        if not last:
-            parts.append("/")
+    cli = Path(executable).resolve()
+    dist = next((parent for parent in cli.parents if parent.name == "dist"), cli.parent)
+    resolver = dist / "core" / "model-resolver.js"
     try:
-        return re.compile("".join(parts), re.IGNORECASE)
-    except re.error:
-        return None
+        indices = _scoped_indices(
+            node,
+            str(resolver),
+            resolver.stat().st_mtime_ns,
+            tuple(patterns),
+            tuple(models),
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # Never include subprocess output: CLI diagnostics can contain local config.
+        _LOGGER.warning("Pi model curation unavailable; using the unscoped catalog")
+        return []
+    return [models[index] for index in indices]
 
 
-def _segment_regex(segment: str) -> str:
-    """Translate one glob segment to regex (``[...]`` classes pass through).
+@lru_cache(maxsize=128)
+def _scoped_indices(
+    node: str,
+    resolver: str,
+    _resolver_mtime_ns: int,
+    patterns: tuple[str, ...],
+    models: tuple[ScopableModel, ...],
+) -> tuple[int, ...]:
+    """Cache successful resolutions by CLI revision, settings and catalog.
 
-    Wildcard runs collapse into single gaps and the fixed pieces between them
-    are committed at their leftmost occurrence (atomic groups), so wildcard-
-    heavy patterns match in linear time instead of backtracking
-    catastrophically. A class Python's ``re`` rejects (e.g. ``[z-a]``)
-    becomes a never-matching atom, like minimatch.
+    :param node: Node executable.
+    :param resolver: Installed Pi resolver module.
+    :param _resolver_mtime_ns: Invalidates cached results after an in-place CLI upgrade.
+    :param patterns: Model selection patterns.
+    :param models: Credential-free catalog entries.
+    :returns: Validated indices into the supplied catalog.
+    :raises ValueError: If the helper's output does not identify catalog entries.
     """
-    # Fixed-width regex runs, split wherever one or more ``*`` appeared.
-    pieces: list[str] = [""]
-    prev_star = False
-    index = 0
-    while index < len(segment):
-        char = segment[index]
-        if char == "*":
-            if not prev_star:
-                pieces.append("")
-            prev_star = True
-            index += 1
-            continue
-        prev_star = False
-        if char == "?":
-            pieces[-1] += "[^/]"
-        elif char == "[":
-            closing = _find_class_end(segment, index)
-            if closing is None:
-                pieces[-1] += re.escape(char)
-            else:
-                inner = segment[index + 1 : closing]
-                if inner.startswith("!"):
-                    inner = "^" + inner[1:]
-                pieces[-1] += _class_regex(inner)
-                index = closing
-        else:
-            pieces[-1] += re.escape(char)
-        index += 1
-    if len(pieces) == 1:
-        return pieces[0]
-    parts = [pieces[0]]
-    for piece in pieces[1:-1]:
-        parts.append(f"(?>[^/]*?{piece})")
-    parts.append("[^/]*")
-    parts.append(pieces[-1])
-    return "".join(parts)
-
-
-def _class_regex(inner: str) -> str:
-    """A validated ``[...]`` class, or a never-matching atom when invalid."""
-    candidate = f"[{inner}]"
-    try:
-        re.compile(candidate)
-    except re.error:
-        return "(?!)"
-    return candidate
-
-
-def _find_class_end(segment: str, start: int) -> int | None:
-    """Index of the ``]`` closing the class at *start*, None when unterminated."""
-    index = start + 1
-    if index < len(segment) and segment[index] in "!^":
-        index += 1
-    if index < len(segment) and segment[index] == "]":
-        index += 1  # a leading ] is a literal member of the class
-    while index < len(segment) and segment[index] != "]":
-        index += 1
-    return index if index < len(segment) else None
+    helper = files("omnigent.resources.pi_native").joinpath("resolve_model_scope.cjs")
+    result = subprocess.run(
+        [node, str(helper), resolver],
+        input=json.dumps(
+            {
+                "patterns": patterns,
+                "models": [
+                    {
+                        "provider": model.provider,
+                        "id": model.model_id,
+                        "name": model.name or model.model_id,
+                    }
+                    for model in models
+                ],
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=True,
+    )
+    indices = json.loads(result.stdout)
+    if not isinstance(indices, list) or any(
+        type(index) is not int or not 0 <= index < len(models) for index in indices
+    ):
+        raise ValueError("Pi resolver returned invalid catalog indices")
+    return tuple(dict.fromkeys(indices))

@@ -21,8 +21,8 @@ import { AlertTriangleIcon, Check, Copy, MessageSquareOffIcon } from "lucide-rea
 import { useEditor, EditorContent } from "@tiptap/react";
 import type { Transaction } from "@tiptap/pm/state";
 import { StarterKit } from "@tiptap/starter-kit";
-import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
-import { ListItem, TaskItem, TaskList } from "@tiptap/extension-list";
+import { TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
+import { ListItem, TaskItem } from "@tiptap/extension-list";
 import { Markdown } from "@tiptap/markdown";
 import type { Comment } from "@/hooks/useComments";
 import type { ActiveSelection } from "./codeViewerHelpers";
@@ -35,6 +35,7 @@ import { useMarkdownEditorSync } from "./useMarkdownEditorSync";
 import { useScrollRestore } from "./useScrollRestore";
 import { useEditorAutoSave } from "./useEditorAutoSave";
 import { MarkdownCommentPlugin } from "./MarkdownCommentPlugin";
+import { MarkdownLinkBubble } from "./MarkdownLinkBubble";
 import { MarkdownSearchBar } from "./MarkdownSearchBar";
 import {
   createCommentDecorationExtension,
@@ -49,6 +50,8 @@ import { CodeBlockWithLanguage } from "./TipTapCodeBlockExtension";
 import { isUserEditUpdate } from "./codeBlockLanguageEdit";
 import { GitHubAlertBlockquote } from "./TipTapGitHubAlert";
 import { HtmlPassthrough } from "./TipTapHtmlPassthrough";
+import { SoftBreak } from "./TipTapSoftBreak";
+import { BoundedTable, BoundedTaskList } from "./tiptapBoundedTokenizers";
 import {
   installMarkdownParserPatch,
   installMarkdownSerializerPatch,
@@ -360,15 +363,18 @@ function MarkdownRichTextViewerInner({
       // built-in `- [ ]` marked tokenizer so the syntax parses into checkbox
       // items, and (b) round-trips back to identical markdown via their
       // built-in renderMarkdown. nested:true lets Tab indent sub-checklists.
-      TaskList,
+      BoundedTaskList,
       TaskItem.configure({ nested: true }),
-      Table.configure({ resizable: true }),
+      BoundedTable.configure({ resizable: true }),
       TableRow,
       TableCell,
       TableHeader,
       ImageAwareLink.configure({ openOnClick: false, autolink: false }),
       GitHubAlertBlockquote,
       HtmlPassthrough,
+      // Soft line breaks in hard-wrapped source render as spaces so Edit mode
+      // reflows prose to the viewer width like Preview; see TipTapSoftBreak.ts.
+      SoftBreak,
       Markdown,
       createWorkspaceImageExtension(conversationId, path),
       createCommentDecorationExtension(commentStateRef),
@@ -509,9 +515,9 @@ function MarkdownRichTextViewerInner({
         className="relative flex-1 overflow-auto px-8 py-6"
         // Link following. The Link extension runs with openOnClick:false so a
         // plain click in edit mode positions the cursor instead of navigating.
-        // Read-only: any click on a link opens it. Edit mode: only a
-        // modifier-click (⌘/Ctrl) opens it, so plain-click-to-edit is preserved
-        // while still giving an escape hatch to follow links (incl. in tables).
+        // Read-only: any click on a link opens it. Edit mode: a modifier-click
+        // (⌘/Ctrl) opens it, and the caret in a link shows MarkdownLinkBubble's
+        // Open action, so plain-click-to-edit is preserved (incl. in tables).
         onClick={(e) => {
           if (canEdit && !e.metaKey && !e.ctrlKey) return;
           const anchor = (e.target as Element).closest("a[href]");
@@ -539,6 +545,9 @@ function MarkdownRichTextViewerInner({
       </div>
       {canEdit && editor && (
         <TableHandles editor={editor} scrollContainerRef={scrollContainerRef} />
+      )}
+      {canEdit && editor && (
+        <MarkdownLinkBubble editor={editor} path={path} scrollContainerRef={scrollContainerRef} />
       )}
       {canEdit && sessionActive && !isDirty && !hasExternalUpdate && (
         <div className="absolute bottom-0 left-0 right-0 z-10 flex items-center gap-1.5 border-t border-border bg-warning/10 px-4 py-1.5 text-sm text-foreground backdrop-blur-sm">
