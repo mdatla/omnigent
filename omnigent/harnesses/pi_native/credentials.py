@@ -466,7 +466,7 @@ def _pi_enabled_model_patterns(root: Path) -> list[str]:
 
 
 def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, object]]:
-    """List Pi's logged-in models, filtered by settings.json enabledModels.
+    """List logged-in and keyed custom models, filtered by Pi's enabledModels.
 
     Use the full catalog when curation is empty or unavailable.
 
@@ -478,11 +478,24 @@ def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, 
     """
     root = agent_dir if agent_dir is not None else _global_pi_agent_dir()
     logged_in = set(_read_json_object(root / "auth.json"))
-    if not logged_in:
-        return []
+    catalogs: list[tuple[str, object]] = [
+        (provider_id, payload)
+        for provider_id, payload in _read_json_object(root / "models-store.json").items()
+        if provider_id in logged_in
+    ]
+    declared = _read_json_object(root / "models.json").get("providers")
+    for provider_id, payload in declared.items() if _is_str_object_dict(declared) else ():
+        api_key = payload.get("apiKey") if _is_str_object_dict(payload) else None
+        if provider_id in logged_in or (isinstance(api_key, str) and api_key):
+            # Appended after the models-store rows so declared models.json names win.
+            catalogs.append((provider_id, payload))
     catalog: dict[str, ScopableModel] = {}
-    for provider_id, payload in _read_json_object(root / "models-store.json").items():
-        if provider_id not in logged_in or not _is_str_object_dict(payload):
+    for provider_id, payload in catalogs:
+        if not _is_str_object_dict(payload):
+            continue
+        if provider_id in _PI_MANAGED_PROVIDER_IDS:
+            # pi_own_login_model_arg() strips these ids as a stale managed pick,
+            # so the launch could not address such a row.
             continue
         models = payload.get("models")
         for model in models if isinstance(models, list) else []:
