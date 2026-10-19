@@ -1183,25 +1183,9 @@ function modelReference(model) {
 }
 
 /**
- * Report Pi's live model catalog to Omnigent for the Web UI model picker.
- *
- * Sourced from Pi's model registry — the models Pi actually loaded for THIS
- * session, whatever their origin: an Omnigent-configured provider's generated
- * models.json, or Pi's own ``/login`` / ``~/.pi`` config. Posting the live
- * registry (rather than the server reading a launch-written file) means the
- * picker populates in every auth path, including ``/login`` where no Omnigent
- * models.json exists.
- *
- * Prefers the session's resolved model scope (``ctx.scopedModels`` — Pi's
- * own resolution of ``--models`` / settings ``enabledModels``, the exact set
- * its Ctrl+P picker cycles), keeping the current model listed even when the
- * scope excludes it so the picker's active row always resolves. An empty
- * scope means no curation; then prefers ``getAvailable()`` — only models
- * with configured auth — over ``getAll()`` (Pi's entire built-in catalog
- * spanning every vendor, most with no credentials), falling back to
- * ``getAll()`` only when ``getAvailable()`` is unavailable (older Pi).
- * Best-effort and fire-and-forget: an empty or unavailable registry posts
- * nothing, leaving the picker hidden.
+ * Publish Pi's scoped models plus the current model to the web picker.
+ * Without a scope, use authenticated models; older registries fall back to getAll.
+ * An empty or unavailable registry posts nothing.
  */
 async function postModelOptions(config, ctx) {
   let models = [];

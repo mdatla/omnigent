@@ -76,9 +76,7 @@ def test_pi_native_prelaunch_picker_offers_only_the_curated_scope(
 async def _drive_curated_pi_picker(base_url: str, session_id: str) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
-        # An explicit context (not browser.new_page()) so closing it finalizes
-        # the recorded video reliably when OMNIGENT_E2E_RECORD_DIR is set -- the
-        # e2e_ui conftest injects `record_video_dir` into new_context.
+        # Closing an explicit context finalizes the conftest-enabled recording.
         context = await browser.new_context()
         page = await context.new_page()
         try:
@@ -115,9 +113,7 @@ async def _drive_curated_pi_picker(base_url: str, session_id: str) -> None:
                 handle_pi_model_options,
             )
 
-            # Seed a recent working directory so a real (non-sandbox) host
-            # workspace is selected -- pi model options are only fetched for a
-            # real host (`useHostModelOptions(hostId, "pi-native", !sandbox)`).
+            # Host model options require a local workspace; sandbox mode skips them.
             await page.add_init_script(
                 f"""window.localStorage.setItem(
                     "omnigent:recent-workspaces",

@@ -1784,9 +1784,7 @@ def resolve_pi_native_provider(
                 "surface; Pi will use its own login."
             )
             return None
-        # Split only when the prefix names a configured provider; any other
-        # slash id is the endpoint's own model naming (e.g. "openai/gpt-4o"
-        # on OpenRouter) and must stay verbatim.
+        # Only strip configured provider prefixes; endpoint IDs may contain slashes.
         if names_configured_provider:
             if prefix != entry.name:
                 unmanaged_prefix_notice = (
