@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { RefObject } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import * as sessionsApi from "@/lib/sessionsApi";
@@ -35,7 +36,9 @@ vi.mock("./SubagentsPanel", () => ({
   SubagentsPanel: () => <div data-testid="subagents-stub" />,
 }));
 vi.mock("./ContentSearchPanel", () => ({
-  ContentSearchPanel: () => <div data-testid="content-search-stub" />,
+  ContentSearchPanel: ({ inputRef }: { inputRef: RefObject<HTMLInputElement | null> }) => (
+    <input data-testid="content-search-stub" ref={inputRef} />
+  ),
 }));
 vi.mock("@/components/BrowserPane/BrowserPane", () => ({
   BrowserPane: ({ conversationId, active }: { conversationId: string; active?: boolean }) => (
@@ -98,7 +101,8 @@ afterEach(() => {
  * onRightRailTabChange) alongside the render result.
  */
 function renderWorkspace(
-  overrides: {
+  initialOverrides: {
+    conversationId?: string;
     rightRailTab?: RightRailTab;
     selectedFilePath?: string | null;
     openFiles?: string[];
@@ -119,6 +123,7 @@ function renderWorkspace(
     mobileSideChatsOpen?: boolean;
   } = {},
 ) {
+  let overrides = initialOverrides;
   const openFileViewer = vi.fn();
   const onCloseFile = vi.fn();
   const onRightRailTabChange = vi.fn();
@@ -127,10 +132,10 @@ function renderWorkspace(
   const onCloseTerminal = vi.fn();
   const onToggleMaximized = vi.fn();
   const onMobileSideChatsOpenChange = vi.fn();
-  const view = render(
+  const tree = () => (
     <TooltipProvider delayDuration={0}>
       <WorkspacePanel
-        conversationId="conv_ws"
+        conversationId={overrides.conversationId ?? "conv_ws"}
         width={360}
         open={overrides.open}
         animateVisibility={overrides.animateVisibility}
@@ -176,9 +181,14 @@ function renderWorkspace(
         mobileSideChatsOpen={overrides.mobileSideChatsOpen}
         onMobileSideChatsOpenChange={onMobileSideChatsOpenChange}
       />
-    </TooltipProvider>,
+    </TooltipProvider>
   );
+  const view = render(tree());
   return {
+    rerender: (next: typeof overrides) => {
+      overrides = { ...overrides, ...next };
+      view.rerender(tree());
+    },
     openFileViewer,
     onCloseFile,
     onRightRailTabChange,
@@ -192,6 +202,26 @@ function renderWorkspace(
 }
 
 describe("WorkspacePanel surface presentation", () => {
+  it.each(["tab", "conversation"])(
+    "cancels a deferred search focus after changing %s",
+    (changed) => {
+      vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+      const { rerender } = renderWorkspace({
+        showContentSearch: true,
+        rightRailTab: "content-search",
+        open: true,
+        inert: true,
+      });
+      const chord = { code: "KeyF", ctrlKey: true, shiftKey: true };
+      fireEvent.keyDown(window, chord);
+      rerender(changed === "tab" ? { rightRailTab: "files" } : { conversationId: "other" });
+      rerender({ rightRailTab: "content-search", inert: false });
+      expect(screen.getByTestId("content-search-stub")).not.toHaveFocus();
+      fireEvent.keyDown(window, chord);
+      expect(screen.getByTestId("content-search-stub")).toHaveFocus();
+    },
+  );
+
   it.each([
     { showContentSearch: false },
     { showContentSearch: true, showFilesPanel: false },
@@ -238,7 +268,7 @@ describe("WorkspacePanel surface presentation", () => {
     expect(screen.queryByRole("tab", { name: "Content search" })).not.toBeInTheDocument();
     expect(screen.queryByTestId("content-search-stub")).not.toBeInTheDocument();
     disabled.view.unmount();
-    const enabled = renderWorkspace({ showContentSearch: true });
+    const enabled = renderWorkspace({ showContentSearch: true, showGithubTab: true });
     expect(screen.getByTestId("content-search-stub")).toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole("tab", { name: "Content search" }), {
       button: 0,
@@ -251,6 +281,11 @@ describe("WorkspacePanel surface presentation", () => {
     });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Content search" }));
     expect(enabled.onRightRailTabChange).toHaveBeenCalledTimes(2);
+    const searchTab = screen.getByRole("tab", { name: "Content search" });
+    expect(searchTab).toHaveAttribute("aria-keyshortcuts", expect.stringContaining(" 5"));
+    fireEvent.keyDown(searchTab, { key: "5" });
+    expect(enabled.onRightRailTabChange).toHaveBeenCalledTimes(3);
+    expect(enabled.onRightRailTabChange).toHaveBeenLastCalledWith("content-search");
   });
 
   it("sits flush to the window edge with a left divider, no floating card frame", () => {

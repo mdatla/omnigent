@@ -1290,6 +1290,7 @@ export function AppShell() {
       // "sidechat" is a dynamic mode (a side-chat tab is selected), not a
       // gated nav tab — always valid, and never a fallback target.
       if (tab === "sidechat") return tab;
+      if (tab === "content-search" && serverInfo === "loading") return tab;
       if (railTabsAvailable[tab]) return tab;
       return (
         (["files", "changes", "github", "subagents", "browser"] as const).find(
@@ -1297,7 +1298,7 @@ export function AppShell() {
         ) ?? tab
       );
     });
-  }, [railTabsAvailable, rightRailTab]);
+  }, [railTabsAvailable, rightRailTab, serverInfo]);
 
   // Selecting the current agent removes the panel query without changing sessions.
   useEffect(() => {
