@@ -78,7 +78,7 @@ _WORKTREE = Path(__file__).resolve().parents[2]
 # a thousand-row union around it.
 _ENABLED_MODEL = "anthropic/claude-sonnet-4-5"
 # Brace syntax must mean the same thing in the host resolver and the running CLI.
-_ENABLED_PATTERN = "anthropic/claude-{sonnet-4-5,not-an-installed-model}*"
+_ENABLED_PATTERN = "anthropic/claude-{sonnet-4-5,not-an-installed-*}"
 
 # Shape of a real openrouter login's multi-vendor models-store.json catalog.
 _OPENROUTER_VENDORS: list[tuple[str, str]] = [
