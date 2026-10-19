@@ -287,6 +287,13 @@ def _pr_payload(
         "base_ref": mr.get("target_branch"),
         "head_ref": mr.get("source_branch"),
         "head_sha": refs.get("head_sha") or mr.get("sha"),
+        "head_repository_url": (
+            f"https://{ref.host}/{ref.repository}"
+            if mr.get("source_project_id") == mr.get("target_project_id")
+            else f"https://{ref.host}/-/project/{mr['source_project_id']}"
+            if isinstance(mr.get("source_project_id"), int)
+            else None
+        ),
         "base_sha": refs.get("base_sha"),
         "body": mr.get("description"),
         "comments": comments,
