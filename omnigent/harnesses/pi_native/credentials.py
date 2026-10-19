@@ -501,15 +501,9 @@ def _pi_own_login_models(root: Path) -> list[ScopableModel]:
 
 
 def pi_own_login_model_options(agent_dir: Path | None = None) -> list[dict[str, object]]:
-    """Enumerate the models Pi's own login can use (the unmanaged fallback).
+    """List logged-in and keyed custom models with Pi's enabledModels curation.
 
-    When no omnigent-managed provider is configured, the launched Pi runs on
-    its own credentials, so the pre-launch picker must offer the models that
-    login can actually drive: Pi's ``models-store.json`` catalog filtered to
-    providers with an ``auth.json`` entry, plus custom providers with an
-    ``apiKey`` in ``models.json``. Apply the ``enabledModels`` curation from
-    ``settings.json`` when it selects anything; Pi falls back to the full
-    catalog when no pattern matches.
+    Use the full inventory when curation is empty or unavailable.
 
     :param agent_dir: Pi agent dir override (tests); defaults to the host's
         own Pi agent dir.
