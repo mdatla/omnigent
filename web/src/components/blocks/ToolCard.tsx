@@ -35,17 +35,13 @@ import {
   type ToolTitle,
   formatToolRunLabel,
   formatToolTitle,
+  toolFilePath,
 } from "@/lib/toolTitle";
-import { useFileViewer } from "@/shell/FileViewerContext";
+import { resolveChatFilePath } from "@/hooks/useWorkspaceChangedFiles";
+import { useFileViewer, useWorkspacePaths } from "@/shell/FileViewerContext";
 
 const OUTPUT_PREVIEW_LINE_LIMIT = 80;
 const OUTPUT_PREVIEW_CHAR_LIMIT = 12_000;
-
-/**
- * Tools whose `args.path` field is a workspace file path that the user
- * should be able to click to open in the FileViewer.
- */
-const FILE_PATH_TOOLS = new Set(["sys_os_read", "sys_os_write", "sys_os_edit"]);
 
 /**
  * If the string is valid JSON, return its 2-space-indented form.
@@ -189,15 +185,13 @@ export function ToolCard({
 
   // When this is a file-path tool and we're inside AppShell, make the path
   // in the trigger row a clickable link that opens the FileViewer.
+  // Absolute paths collapse onto the workspace like chat file links do.
   const openFile = useFileViewer();
-  const rawPath =
-    FILE_PATH_TOOLS.has(name) &&
-    typeof args.path === "string" &&
-    args.path.length > 0 &&
-    !args.path.startsWith("/") // FileViewer rejects absolute paths
-      ? args.path
-      : null;
-  const onBodyClick = openFile && rawPath ? () => openFile(rawPath) : undefined;
+  const { root, home } = useWorkspacePaths();
+  const toolPath = toolFilePath(name, args);
+  const linkPath =
+    toolPath === null ? null : (resolveChatFilePath(toolPath, root, home)?.path ?? null);
+  const onBodyClick = openFile && linkPath ? () => openFile(linkPath) : undefined;
 
   return (
     <Collapsible defaultOpen={false} className="group not-prose w-full">

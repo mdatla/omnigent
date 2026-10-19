@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatToolRunLabel, formatToolTitle } from "./toolTitle";
+import { formatToolRunLabel, formatToolTitle, toolFilePath } from "./toolTitle";
 
 describe("formatToolTitle", () => {
   it("strips sys_os_shell down to the command string with no bold verb", () => {
@@ -211,6 +211,22 @@ describe("formatToolTitle", () => {
       verb: null,
       body: "sys_os_shell({command:42})",
     });
+  });
+});
+
+describe("toolFilePath", () => {
+  it("reads each harness's path argument for single-file tools", () => {
+    expect(toolFilePath("sys_os_write", { path: "a.md" })).toBe("a.md");
+    expect(toolFilePath("Write", { file_path: "/ws/a.md" })).toBe("/ws/a.md");
+    expect(toolFilePath("NotebookEdit", { notebook_path: "n.ipynb" })).toBe("n.ipynb");
+    expect(toolFilePath("write", { filePath: "b.md", path: "c.md" })).toBe("b.md");
+    expect(toolFilePath("apply_patch", { changes: [{ path: "d.md" }] })).toBe("d.md");
+  });
+
+  it("returns null when the call doesn't target exactly one file", () => {
+    expect(toolFilePath("Bash", { command: "cat a.md" })).toBeNull();
+    expect(toolFilePath("Write", { file_path: "" })).toBeNull();
+    expect(toolFilePath("apply_patch", { changes: [{ path: "a" }, { path: "b" }] })).toBeNull();
   });
 });
 
