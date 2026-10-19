@@ -461,9 +461,7 @@ def test_cold_resume_keeps_explicit_openai_codex_selection(
             "generated provider instead of its own login and the picker collapses "
             f"to it. models.json refs: {_model_refs(models_config)}"
         )
-        # The relaunched Pi publishes its live catalog to the session (what the
-        # web /model picker shows): the pick and Pi's other own-login models
-        # must be offered, with no managed omnigent/ entry.
+        # Relaunch must retain the own-login catalog without an omnigent/ rewrite.
         option_ids = [
             option.get("id")
             for option in _wait_for_pushed_model_options(
