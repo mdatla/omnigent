@@ -73,9 +73,7 @@ pytestmark = _pi_toolchain_marks
 # PYTHONPATH entries for the daemon-spawned runner (cwd = the workspace).
 _WORKTREE = Path(__file__).resolve().parents[2]
 
-# Pi's own curation: the ONE model the user enabled in pi's settings.json.
-# Pi's Ctrl+P picker cycles exactly this; the Omnigent pickers must not offer
-# a thousand-row union around it.
+# Both pickers must honor Pi's single-model enabledModels scope.
 _ENABLED_MODEL = "anthropic/claude-sonnet-4-5"
 # Brace syntax must mean the same thing in the host resolver and the running CLI.
 _ENABLED_PATTERN = "anthropic/claude-{sonnet-4-5,not-an-installed-*}"
@@ -245,9 +243,7 @@ def multi_login_pi_host(
     home = tmp_path_factory.mktemp("multi-login-pi-home")
     host_id = _seed_multi_login_pi_home(home)
     daemon_log = home / "host-daemon.log"
-    # Pin HOME and OMNIGENT_CONFIG_HOME to the seeded dir so the daemon reads
-    # the seeded (provider-less) omnigent config and Pi's multi-login, not any
-    # ambient config the surrounding session exported.
+    # Isolate the daemon from the developer's Omnigent config and Pi logins.
     env = {
         **os.environ,
         "HOME": str(home),
@@ -255,9 +251,7 @@ def multi_login_pi_host(
         PROCESS_LOG_FILE_ENV_VAR: str(daemon_log),
     }
     strip_leaked_runner_env(env)
-    # Absolute worktree roots on PYTHONPATH: the daemon-spawned runner runs
-    # with cwd=<workspace>, so relative entries dangle (see the sibling
-    # unmanaged-Pi module for the full rationale).
+    # The runner changes cwd to the workspace, so PYTHONPATH must be absolute.
     _existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(
         [
