@@ -406,6 +406,58 @@ async def test_flush_with_stale_row_keeps_monotonic_clamp(db_uri: str) -> None:
     assert _usage(store, conv.id)["total_cost_usd"] == pytest.approx(10.0)
 
 
+def test_restarted_harness_counters_log_a_frozen_cost_warning(
+    db_uri: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cumulative report below the persisted total must be visible in logs.
+
+    Native harnesses report a PER-PROCESS cumulative: a fresh CLI process (or a
+    resume whose transcript baseline was lost) restarts every counter at 0. The
+    monotonic clamp keeps the persisted figure — correct, but the daily rollup
+    then records nothing until the new process out-spends the session's whole
+    history, which is why a long session's recorded cost can freeze far below
+    what the provider bills. That failure is silent in every other surface, so
+    the flush must log it.
+    """
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="restarted-counters", agent_id=_AGENT_ID)
+
+    _persist_native_cumulative_usage(
+        conv.id, {"cumulative_cost_usd": 3.0, "model": "m1"}, store
+    )
+    with caplog.at_level("WARNING"):
+        _persist_native_cumulative_usage(
+            conv.id, {"cumulative_cost_usd": 0.4, "model": "m1"}, store
+        )
+
+    # The clamp still holds the high-water mark (no clawback, no corruption)...
+    assert _usage(store, conv.id)["total_cost_usd"] == pytest.approx(3.0)
+    # ...and the regression is now observable instead of silent.
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "harness counters restarted" in message for message in messages
+    ), messages
+
+
+def test_growing_report_does_not_log_the_restart_warning(
+    db_uri: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The tripwire must stay quiet for a normal monotonic report."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="growing", agent_id=_AGENT_ID)
+
+    with caplog.at_level("WARNING"):
+        _persist_native_cumulative_usage(
+            conv.id, {"cumulative_cost_usd": 0.5, "model": "m1"}, store
+        )
+        _persist_native_cumulative_usage(
+            conv.id, {"cumulative_cost_usd": 0.9, "model": "m1"}, store
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any("harness counters restarted" in message for message in messages), messages
+
+
 @pytest.mark.asyncio
 async def test_flush_with_supplied_row_skips_tree_root_rereads(db_uri: str) -> None:
     """The flush's read-only tree walks must reuse the supplied row's root.
