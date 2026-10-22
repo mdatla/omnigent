@@ -1752,6 +1752,70 @@ module.exports = function (pi) {
 
   // Fold one assistant message's usage into the cumulative session totals,
   // deduped by fingerprint. Returns true when it counted (totals advanced).
+  // Seed the cumulative counters from what the SERVER already holds for this
+  // conversation. Pi reports *per-process* cumulatives: a fresh ``pi`` launch
+  // starts every counter at 0, so a resumed session re-earns its spend from
+  // zero. The server stores cost with SET semantics under a monotonic clamp
+  // (``total_cost_usd = max(old, reported)``), so a restarted counter looks
+  // like "no progress" and the daily rollup records nothing — the session's
+  // cost freezes at the largest single-process total while the provider keeps
+  // billing every process. That is the whole "Fireworks charges more than the
+  // usage tab shows" gap: a long session resumed N times reports only its
+  // best individual run.
+  //
+  // Restoring the baseline makes the cumulative genuinely cumulative across
+  // launches, so every subsequent delta (and therefore every daily-rollup
+  // entry) is the true turn cost. The server is the only durable record here:
+  // Pi's local session file is not guaranteed to survive (the native bridge
+  // reaper removes dead owners' bridge dirs, which hold ``sessions/*.jsonl``),
+  // and ``--continue``-style replays do not re-emit usage.
+  //
+  // Best-effort and fail-open: an unreachable server leaves the counters at 0,
+  // which is exactly the old behaviour.
+  async function restoreUsageBaseline() {
+    if (!config || !config.serverUrl || !config.sessionId) return;
+    if (typeof fetch !== "function") return;
+    const url = `${config.serverUrl}/v1/sessions/${encodeURIComponent(config.sessionId)}`;
+    let payload = null;
+    try {
+      const resp = await fetch(url, { method: "GET", headers: headers(config) });
+      if (!resp || !resp.ok || typeof resp.json !== "function") return;
+      payload = await resp.json();
+    } catch (_err) {
+      return;
+    }
+    if (!payload || typeof payload !== "object") return;
+    const num = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    };
+    // ``usage_by_model`` stores the split the server derived: ``input_tokens``
+    // is the NON-cached remainder and ``cache_read_input_tokens`` is carried
+    // separately, so the extension's ``input`` (which includes cache reads)
+    // is their sum. ``cache_creation_input_tokens`` is not persisted per model;
+    // a non-zero cache-write report therefore shrinks the restored input by
+    // that amount — never the reported totals, which only ratchet up.
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    const byModel = payload.usage_by_model;
+    if (byModel && typeof byModel === "object") {
+      for (const bucket of Object.values(byModel)) {
+        if (!bucket || typeof bucket !== "object") continue;
+        const cacheRead = num(bucket.cache_read_input_tokens);
+        inputTokens += num(bucket.input_tokens) + cacheRead;
+        outputTokens += num(bucket.output_tokens);
+        cacheReadTokens += cacheRead;
+      }
+    }
+    const costUsd = num(payload.total_cost_usd);
+    if (inputTokens > cumulativeInputTokens) cumulativeInputTokens = inputTokens;
+    if (outputTokens > cumulativeOutputTokens) cumulativeOutputTokens = outputTokens;
+    if (cacheReadTokens > cumulativeCacheReadTokens)
+      cumulativeCacheReadTokens = cacheReadTokens;
+    if (costUsd > cumulativeCostUsd) cumulativeCostUsd = costUsd;
+  }
+
   function accumulateUsage(message) {
     const usage = extractPiUsage(message);
     if (!usage) return false;
@@ -2080,6 +2144,10 @@ module.exports = function (pi) {
         ? ctx.sessionManager.getSessionId()
         : undefined;
     await patchExternalSessionId(config, nativeSessionId);
+    // Carry the server's recorded spend into this process's counters BEFORE any
+    // turn can flush usage, so a resumed session keeps accumulating instead of
+    // restarting at 0 (see restoreUsageBaseline).
+    await restoreUsageBaseline();
     // Publish Pi's live model catalog so the Web UI picker populates from what
     // Pi actually loaded, independent of how it authenticated.
     await postModelOptions(config, ctx);

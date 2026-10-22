@@ -1846,6 +1846,26 @@ def _persist_native_cumulative_usage(
     # label writes — usage was the missing half.)
     old_cost = float(current.get("total_cost_usd", 0.0) or 0.0)
     old_policy_cost = float(current.get("policy_cost_usd", 0.0) or 0.0)
+    if cost is not None and old_cost > 0.0 and cost < old_cost:
+        # A cumulative total that went BACKWARDS means the reporting harness
+        # restarted its counters (a fresh native-CLI process, or a resumed
+        # session whose transcript baseline was lost). The monotonic clamp below
+        # keeps the persisted figure, so nothing corrupts — but the *daily
+        # rollup* then records nothing until the new process out-spends
+        # everything the session already did, which for a long session may never
+        # happen. Surface it: a silently frozen cost looks exactly like "the
+        # usage tab disagrees with the provider bill". The fix is on the harness
+        # side (restore the cumulative baseline on start, e.g. pi-native's
+        # restoreUsageBaseline); this log is the tripwire when it regresses.
+        _logger.warning(
+            "Cumulative cost report for session %r ($%.6f) is below the persisted "
+            "total ($%.6f): the harness counters restarted, so this report adds "
+            "nothing to the daily rollup until it exceeds the stored total. "
+            "Restore the cumulative usage baseline on harness start.",
+            session_id,
+            float(cost),
+            old_cost,
+        )
     # Old cumulative token totals, captured before the overwrites below so
     # per-model attribution can add only this report's growth (new - old).
     old_tokens = {key: int(current.get(key, 0) or 0) for key in _MODEL_TOKEN_KEYS}

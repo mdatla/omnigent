@@ -32,7 +32,7 @@ const harnesses = [];
 // Build a fresh extension instance with its own temp inbox directory. Each call
 // produces independent closure state (activeResponseId, pendingInterruptUntil,
 // latestContext, ...).
-function makeHarness({ captureEvents = false, existingTools = [] } = {}) {
+function makeHarness({ captureEvents = false, existingTools = [], sessionUsage = null } = {}) {
   const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-native-inbox-"));
   const configPath = path.join(inboxDir, "config.json");
   // A serverUrl + sessionId make postEvent attempt a real fetch; with a mock
@@ -48,7 +48,14 @@ function makeHarness({ captureEvents = false, existingTools = [] } = {}) {
   const postedEvents = [];
   if (captureEvents) {
     global.fetch = async (url, opts) => {
+      const method = (opts && opts.method) || "GET";
       try {
+        if (method === "GET" && String(url).includes("/v1/sessions/")) {
+          // Baseline restore reads the server's recorded spend; ``sessionUsage``
+          // lets a test supply the payload the server would return.
+          if (sessionUsage === null) return { ok: false, status: 404, json: async () => ({}) };
+          return { ok: true, status: 200, json: async () => sessionUsage };
+        }
         if (opts && typeof opts.body === "string" && String(url).endsWith("/events")) {
           postedEvents.push(JSON.parse(opts.body));
         }
@@ -378,6 +385,102 @@ async function testUsageOmitsCostWhenPiReportsNone() {
   );
 }
 
+async function testUsageRestoresServerBaselineOnStart() {
+  // Regression (the "Fireworks charges more than the usage tab shows" gap):
+  // Pi reports PER-PROCESS cumulative usage, so a resumed session restarted
+  // every counter at 0. The server stores cost under a monotonic clamp, so a
+  // restarted counter reads as "no new spend" and the daily rollup records
+  // nothing until the new process re-earns everything the session already
+  // spent — for a long session it never does, and the tab freezes at the
+  // largest single-process total while the provider keeps billing.
+  //
+  // session_start must seed the counters from the server's stored usage so the
+  // cumulative stays cumulative across launches.
+  const h = makeHarness({
+    captureEvents: true,
+    sessionUsage: {
+      total_cost_usd: 1.5,
+      usage_by_model: {
+        "accounts/fireworks/models/deepseek-v4p1-flash": {
+          input_tokens: 4000,
+          output_tokens: 300,
+          cache_read_input_tokens: 20000,
+        },
+        "accounts/fireworks/models/glm-5p3": {
+          input_tokens: 1000,
+          output_tokens: 100,
+          cache_read_input_tokens: 5000,
+        },
+      },
+    },
+  });
+  await h.handlers.session_start({}, makeCtx({ idle: true }));
+
+  await h.handlers.message_end(
+    { message: assistantUsageMessage({ responseId: "r1", timestamp: 1, cost: 0.00057 }) },
+    makeCtx({ idle: true }),
+  );
+
+  const last = sessionUsageEvents(h).pop();
+  assert(
+    "session_start seeds the cumulative cost from the server",
+    !!last && Math.abs(Number(last.cumulative_cost_usd) - 1.50057) < 1e-9,
+    JSON.stringify(last),
+  );
+  assert(
+    "session_start seeds cumulative tokens from every per-model bucket",
+    !!last &&
+      last.cumulative_input_tokens === 36000 &&
+      last.cumulative_output_tokens === 600 &&
+      last.cumulative_cache_read_input_tokens === 30000,
+    JSON.stringify(last),
+  );
+}
+
+async function testUsageBaselineUnavailableLeavesCountersAtZero() {
+  // Fail-open: no server reachable (or an older server without the usage
+  // fields) must leave the counters untouched — identical to the pre-fix
+  // behaviour, never a crash and never a fabricated baseline.
+  const h = makeHarness({ captureEvents: true, sessionUsage: null });
+  await h.handlers.session_start({}, makeCtx({ idle: true }));
+  await h.handlers.message_end(
+    { message: assistantUsageMessage({ responseId: "r1", timestamp: 1, cost: 0.00057 }) },
+    makeCtx({ idle: true }),
+  );
+  const last = sessionUsageEvents(h).pop();
+  assert(
+    "unavailable baseline leaves the counters at this process's usage",
+    !!last && Math.abs(Number(last.cumulative_cost_usd) - 0.00057) < 1e-9,
+    JSON.stringify(last),
+  );
+  assert(
+    "unavailable baseline leaves tokens at this process's usage",
+    !!last && last.cumulative_input_tokens === 6000 && last.cumulative_output_tokens === 200,
+    JSON.stringify(last),
+  );
+}
+
+async function testUsageBaselineAddsToThisProcessUsage() {
+  // The server value is a floor, not a reset: a smaller stored total must never
+  // be dropped (that would lose the session's earlier spend) — it is the
+  // starting point this process adds to.
+  const h = makeHarness({
+    captureEvents: true,
+    sessionUsage: { total_cost_usd: 0.0001, usage_by_model: {} },
+  });
+  await h.handlers.session_start({}, makeCtx({ idle: true }));
+  await h.handlers.message_end(
+    { message: assistantUsageMessage({ responseId: "r1", timestamp: 1, cost: 0.00057 }) },
+    makeCtx({ idle: true }),
+  );
+  const last = sessionUsageEvents(h).pop();
+  assert(
+    "a small stored baseline is kept and this process's call adds to it",
+    !!last && Math.abs(Number(last.cumulative_cost_usd) - 0.00067) < 1e-9,
+    JSON.stringify(last),
+  );
+}
+
 async function testAgentStartClearsStaleWindow() {
   // Belt-and-suspenders: even if a window is armed during a live turn, a brand
   // new agent loop must start clean and not abort its first tool call.
@@ -687,6 +790,9 @@ async function testQueuedPromptDuringStartupStaysRunningUntilAgentEnd() {
     await testAgentStartClearsStaleWindow();
     await testUsageForwardsPiCost();
     await testUsageOmitsCostWhenPiReportsNone();
+    await testUsageRestoresServerBaselineOnStart();
+    await testUsageBaselineUnavailableLeavesCountersAtZero();
+    await testUsageBaselineAddsToThisProcessUsage();
   } finally {
     for (const h of harnesses) {
       if (h.pi.__omnigentInboxPoller) clearInterval(h.pi.__omnigentInboxPoller);
