@@ -228,10 +228,11 @@ const ctx = {
 function usageEvents() {
   return postedEvents.filter((e) => e.type === "external_session_usage");
 }
-async function recordUsage(handlers, timestamp, input, output) {
+async function recordUsage(handlers, timestamp, input, output, cost) {
   await handlers.message_end({ message: {
     role: "assistant", model: "databricks-claude-sonnet-4-6", timestamp,
-    usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output },
+    usage: { input, output, cacheRead: 0, cacheWrite: 0,
+      totalTokens: input + output, cost: { total: cost } },
   }}, ctx);
 }
 """
@@ -286,138 +287,6 @@ def test_message_end_posts_external_session_usage(tmp_path: Path) -> None:
   assert.equal(data.cumulative_output_tokens, 40);
   assert.equal(data.cumulative_cache_read_input_tokens, 30);
   assert.equal(data.model, "databricks-claude-sonnet-4-6");
-})().catch((error) => {
-  console.error(error && error.stack ? error.stack : error);
-  process.exit(1);
-});
-"""
-    )
-    _run_extension_script(node, extension_path, script)
-
-
-def test_message_end_forwards_pi_cost(tmp_path: Path) -> None:
-    """Pi's own per-call cost is forwarded as ``cumulative_cost_usd``.
-
-    Regression: the extension forwarded only token counts and left pricing to
-    the server's shared catalog. For any model the catalog cannot price — a
-    gateway's own namespaced id such as Fireworks'
-    ``accounts/fireworks/models/<id>`` — the server stored the tokens and left
-    ``total_cost_usd`` absent, so the Session-cost badge read $0.00 forever.
-
-    Pi already computes exact USD per call and carries it on the message as
-    ``usage.cost.total``. Forwarding it is what makes the badge correct without
-    depending on catalog coverage.
-    """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is required for the pi-native extension e2e test")
-    extension_path = (
-        Path(__file__).resolve().parents[3]
-        / "omnigent"
-        / "resources"
-        / "pi_native"
-        / "omnigent_pi_native_extension.js"
-    )
-
-    script = (
-        _usage_test_preamble()
-        + r"""
-(async () => {
-  const message = (responseId, timestamp, costTotal) => ({
-    role: "assistant",
-    model: "accounts/fireworks/models/deepseek-v4p1-flash",
-    responseId,
-    timestamp,
-    content: [{ type: "text", text: "hi" }],
-    usage: {
-      input: 100,
-      output: 40,
-      cacheRead: 30,
-      cacheWrite: 10,
-      totalTokens: 180,
-      cost: { input: 0.1, output: 0.2, cacheRead: 0.05, cacheWrite: 0.02, total: costTotal },
-    },
-  });
-
-  await handlers.message_end({ message: message("r1", 1, 0.37) }, ctx);
-  await handlers.message_end({ message: message("r2", 2, 0.13) }, ctx);
-
-  const usage = usageEvents();
-  const data = usage[usage.length - 1].data;
-  // Pi's cost is summed alongside the token counts, to full float precision.
-  assert.ok(
-    Math.abs(data.cumulative_cost_usd - 0.5) < 1e-9,
-    `cumulative_cost_usd=${data.cumulative_cost_usd} ${JSON.stringify(data)}`,
-  );
-  // The token fields are unaffected by carrying cost.
-  assert.equal(data.cumulative_input_tokens, 280);
-  assert.equal(data.cumulative_output_tokens, 80);
-  assert.equal(data.cumulative_cache_read_input_tokens, 60);
-  assert.equal(data.model, "accounts/fireworks/models/deepseek-v4p1-flash");
-
-  // A re-delivered message must not double-count its cost any more than its
-  // tokens (the fingerprint dedup covers both).
-  await handlers.turn_end({ message: message("r2", 2, 0.13) }, ctx);
-  const after = usageEvents();
-  const latest = after[after.length - 1].data;
-  assert.ok(
-    Math.abs(latest.cumulative_cost_usd - 0.5) < 1e-9,
-    `re-delivery double-counted cost: ${latest.cumulative_cost_usd}`,
-  );
-})().catch((error) => {
-  console.error(error && error.stack ? error.stack : error);
-  process.exit(1);
-});
-"""
-    )
-    _run_extension_script(node, extension_path, script)
-
-
-def test_usage_without_pi_cost_omits_the_cost_field(tmp_path: Path) -> None:
-    """No ``usage.cost`` means no ``cumulative_cost_usd``, but tokens still flow.
-
-    An own-login or otherwise unpriced model reports no cost. The flush must
-    still carry the token counts so the per-model token view populates, and must
-    NOT claim a $0.00 cost: absent means unpriced, and a synthesized zero would
-    present a confidently wrong figure to the badge and the daily rollup.
-    """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is required for the pi-native extension e2e test")
-    extension_path = (
-        Path(__file__).resolve().parents[3]
-        / "omnigent"
-        / "resources"
-        / "pi_native"
-        / "omnigent_pi_native_extension.js"
-    )
-
-    script = (
-        _usage_test_preamble()
-        + r"""
-(async () => {
-  await handlers.message_end(
-    {
-      message: {
-        role: "assistant",
-        model: "some-own-login-model",
-        responseId: "r1",
-        timestamp: 1,
-        content: [{ type: "text", text: "hi" }],
-        usage: { input: 100, output: 40, cacheRead: 30, cacheWrite: 10, totalTokens: 180 },
-      },
-    },
-    ctx,
-  );
-
-  const usage = usageEvents();
-  assert.equal(usage.length, 1, JSON.stringify(postedEvents));
-  const data = usage[0].data;
-  assert.equal(data.cumulative_input_tokens, 140);
-  assert.ok(
-    !("cumulative_cost_usd" in data),
-    `expected no cumulative_cost_usd, got ${JSON.stringify(data)}`,
-  );
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exit(1);
@@ -609,10 +478,11 @@ def test_usage_baseline_survives_native_restart(baseline_source: str) -> None:
 (async () => {
 
   await handlers.session_start({}, ctx);
-  await recordUsage(handlers, 1000, 150000, 30000);
+  await recordUsage(handlers, 1000, 150000, 30000, 0.75);
   const saved = JSON.parse(fs.readFileSync(statePath));
   assert.equal(saved.cumulative_input_tokens, 150000);
   assert.equal(saved.cumulative_output_tokens, 30000);
+  assert.equal(saved.cumulative_cost_usd, 0.75);
   if (baselineSource !== "local") {
     const cfg = JSON.parse(fs.readFileSync(configPath));
     cfg.usageBaseline = { ...saved };
@@ -620,6 +490,7 @@ def test_usage_baseline_survives_native_restart(baseline_source: str) -> None:
     if (baselineSource === "unreported-local") {
       cfg.usageBaseline.cumulative_input_tokens = 100000;
       cfg.usageBaseline.cumulative_output_tokens = 20000;
+      cfg.usageBaseline.cumulative_cost_usd = 0.5;
     }
     fs.writeFileSync(configPath, JSON.stringify(cfg));
     if (baselineSource === "server") fs.unlinkSync(statePath);
@@ -631,14 +502,55 @@ def test_usage_baseline_survives_native_restart(baseline_source: str) -> None:
   postedEvents.length = 0;
   const resumed = launchExtension();
   await resumed.session_start({}, ctx);
-  await recordUsage(resumed, 2000, 900, 250);
+  await recordUsage(resumed, 2000, 900, 250, 0.25);
+  await recordUsage(resumed, 2000, 900, 250, 0.25);
   const reasserts = baselineSource === "local" || baselineSource === "unreported-local";
   assert.deepEqual(usageEvents().map(({data}) => [
-    data.cumulative_input_tokens, data.cumulative_output_tokens, data.model,
+    data.cumulative_input_tokens, data.cumulative_output_tokens, data.cumulative_cost_usd,
   ]), [
-    ...(reasserts ? [[150000, 30000, "databricks-claude-sonnet-4-6"]] : []),
-    [150900, 30250, "databricks-claude-sonnet-4-6"],
+    ...(reasserts ? [[150000, 30000, 0.75]] : []),
+    [150900, 30250, 1],
   ]);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    result = _run_node(script, str(_extension_path()))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("cost", [None, 0, -1, "0.5", True])
+@pytest.mark.parametrize("baseline_source", ["local", "server"])
+@pytest.mark.parametrize("priced_first", [False, True])
+def test_incomplete_pi_cost_keeps_server_pricing(
+    cost: object, baseline_source: str, priced_first: bool
+) -> None:
+    script = (
+        _usage_test_preamble()
+        + "\nconst cost = "
+        + json.dumps(cost)
+        + "; const baselineSource = "
+        + json.dumps(baseline_source)
+        + "; const pricedFirst = "
+        + json.dumps(priced_first)
+        + ";\n"
+        + r"""
+(async () => {
+  await recordUsage(handlers, 1000, 100, 20, pricedFirst ? 0.5 : cost);
+  await recordUsage(handlers, 2000, 100, 20, pricedFirst ? cost : 0.5);
+  assert.ok(!("cumulative_cost_usd" in usageEvents().at(-1).data));
+  assert.equal(usageEvents().at(-1).data.cost_complete, false);
+  postedEvents.length = 0;
+  const cfg = JSON.parse(fs.readFileSync(configPath));
+  cfg.usageBaseline = JSON.parse(fs.readFileSync(statePath));
+  delete cfg.usageBaseline.cost_complete;
+  if (baselineSource === "server") fs.unlinkSync(statePath);
+  else cfg.usageBaseline.cumulative_cost_usd = 0.75; // stale display subtotal
+  fs.writeFileSync(configPath, JSON.stringify(cfg));
+  const resumed = launchExtension();
+  await resumed.session_start({}, ctx);
+  await recordUsage(resumed, 3000, 100, 20, 0.5);
+  assert.ok(usageEvents().every(({data}) => !("cumulative_cost_usd" in data)));
+  assert.equal(usageEvents().at(-1).data.cumulative_input_tokens, 300);
 })().catch(error => { console.error(error); process.exit(1); });
 """
     )

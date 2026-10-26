@@ -628,17 +628,8 @@ _BEDROCK_ANTHROPIC_PATTERN = re.compile(
 # model the workspace serves as its ``databricks-<model>`` endpoint.
 _DATABRICKS_SYSTEM_AI_PREFIX = "system.ai."
 
-# Fireworks serves every model under its own ``accounts/fireworks/`` namespace —
-# ``.../models/<id>`` for direct models and ``.../routers/<id>`` for routed
-# variants — and harnesses report that bare gateway id. The shared catalog files
-# those entries under the ``fireworks_ai`` provider verbatim, so route the
-# namespace there; falling through to OpenRouter leaves the turn unpriced (token
-# counts show, USD cost stays absent) because OpenRouter has no entry under the
-# namespaced id.
+# Fireworks gateway IDs retain their account namespace in the catalog.
 _FIREWORKS_MODEL_PREFIX = "accounts/fireworks/"
-# Provider alias stamped on the resolved model id
-# (``fireworks/accounts/fireworks/models/<id>``); the catalog spells the
-# provider ``fireworks_ai``.
 _FIREWORKS_PROVIDER_ALIAS = "fireworks"
 
 

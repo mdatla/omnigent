@@ -32,7 +32,7 @@ const harnesses = [];
 // Build a fresh extension instance with its own temp inbox directory. Each call
 // produces independent closure state (activeResponseId, pendingInterruptUntil,
 // latestContext, ...).
-function makeHarness({ captureEvents = false, existingTools = [], sessionUsage = null } = {}) {
+function makeHarness({ captureEvents = false, existingTools = [] } = {}) {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-native-inbox-"));
   const inboxDir = path.join(fixtureRoot, "inbox");
   fs.mkdirSync(inboxDir);
@@ -50,14 +50,7 @@ function makeHarness({ captureEvents = false, existingTools = [], sessionUsage =
   const postedEvents = [];
   if (captureEvents) {
     global.fetch = async (url, opts) => {
-      const method = (opts && opts.method) || "GET";
       try {
-        if (method === "GET" && String(url).includes("/v1/sessions/")) {
-          // Baseline restore reads the server's recorded spend; ``sessionUsage``
-          // lets a test supply the payload the server would return.
-          if (sessionUsage === null) return { ok: false, status: 404, json: async () => ({}) };
-          return { ok: true, status: 200, json: async () => sessionUsage };
-        }
         if (opts && typeof opts.body === "string" && String(url).endsWith("/events")) {
           postedEvents.push(JSON.parse(opts.body));
         }
@@ -272,214 +265,6 @@ async function testMidTurnInterruptFallbackNoIsIdle() {
     "mid-turn interrupt aborts (activeResponseId fallback)",
     turnCtx.abortCount >= 1,
     `abortCount=${turnCtx.abortCount}`,
-  );
-}
-
-// Build an assistant message shaped like Pi's ``AssistantMessage``: per-message
-// token counts plus Pi's own USD cost for the call.
-function assistantUsageMessage({ responseId, timestamp, cost, model }) {
-  return {
-    role: "assistant",
-    model: model || "accounts/fireworks/models/deepseek-v4p1-flash",
-    timestamp,
-    responseId,
-    usage: {
-      input: 1000,
-      output: 200,
-      cacheRead: 5000,
-      cacheWrite: 0,
-      totalTokens: 6200,
-      cost: {
-        input: 0.0003,
-        output: 0.00024,
-        cacheRead: 0.00003,
-        cacheWrite: 0,
-        total: cost,
-      },
-    },
-    content: [{ type: "text", text: "ok" }],
-  };
-}
-
-function sessionUsageEvents(h) {
-  return h.postedEvents
-    .filter((item) => item.type === "external_session_usage" && item.data)
-    .map((item) => item.data);
-}
-
-async function testUsageForwardsPiCost() {
-  // Regression: the extension forwarded only token counts and let the server
-  // price them from the shared catalog. For a model the catalog cannot price —
-  // a gateway's own namespaced id such as Fireworks'
-  // ``accounts/fireworks/models/<id>`` — the server stored the tokens and left
-  // ``total_cost_usd`` absent, so the Session-cost badge read $0.00 forever.
-  // Pi already computes exact USD per call as ``usage.cost.total``; forwarding
-  // it as ``cumulative_cost_usd`` is what makes the badge correct.
-  const h = makeHarness({ captureEvents: true });
-  await h.handlers.session_start({}, makeCtx({ idle: true }));
-
-  await h.handlers.message_end(
-    { message: assistantUsageMessage({ responseId: "r1", timestamp: 1, cost: 0.00057 }) },
-    makeCtx({ idle: true }),
-  );
-  await h.handlers.message_end(
-    { message: assistantUsageMessage({ responseId: "r2", timestamp: 2, cost: 0.00043 }) },
-    makeCtx({ idle: true }),
-  );
-
-  const flushes = sessionUsageEvents(h);
-  const last = flushes[flushes.length - 1];
-  assert(
-    "usage flush carries Pi's cumulative cost",
-    !!last && Math.abs(Number(last.cumulative_cost_usd) - 0.001) < 1e-9,
-    JSON.stringify(last),
-  );
-  assert(
-    "usage flush keeps the cumulative token counts alongside cost",
-    !!last &&
-      last.cumulative_input_tokens === 12000 &&
-      last.cumulative_output_tokens === 400 &&
-      last.cumulative_cache_read_input_tokens === 10000,
-    JSON.stringify(last),
-  );
-  assert(
-    "usage flush still names the model for the per-model breakdown",
-    !!last && last.model === "accounts/fireworks/models/deepseek-v4p1-flash",
-    JSON.stringify(last),
-  );
-
-  // The same message re-emitted on a later lifecycle event must not double-count
-  // its cost any more than its tokens (the fingerprint dedup covers both).
-  await h.handlers.turn_end(
-    { message: assistantUsageMessage({ responseId: "r2", timestamp: 2, cost: 0.00043 }) },
-    makeCtx({ idle: true }),
-  );
-  const afterRedelivery = sessionUsageEvents(h).pop();
-  assert(
-    "re-delivered message does not double-count cost",
-    !!afterRedelivery && Math.abs(Number(afterRedelivery.cumulative_cost_usd) - 0.001) < 1e-9,
-    JSON.stringify(afterRedelivery),
-  );
-}
-
-async function testUsageOmitsCostWhenPiReportsNone() {
-  // An own-login or unpriced model reports no ``usage.cost``. The flush must
-  // still carry the token counts (so the per-model token view populates) and
-  // must NOT claim a $0.00 cost — absent means unpriced, and writing a zero
-  // would present a confidently wrong figure.
-  const h = makeHarness({ captureEvents: true });
-  await h.handlers.session_start({}, makeCtx({ idle: true }));
-
-  const message = assistantUsageMessage({ responseId: "r1", timestamp: 1, cost: 0 });
-  delete message.usage.cost;
-  await h.handlers.message_end({ message }, makeCtx({ idle: true }));
-
-  const last = sessionUsageEvents(h).pop();
-  assert(
-    "usage flush without a Pi cost still reports tokens",
-    !!last && last.cumulative_input_tokens === 6000 && last.cumulative_output_tokens === 200,
-    JSON.stringify(last),
-  );
-  assert(
-    "usage flush without a Pi cost omits cumulative_cost_usd",
-    !!last && !("cumulative_cost_usd" in last),
-    JSON.stringify(last),
-  );
-}
-
-async function testUsageRestoresServerBaselineOnStart() {
-  // Regression (the "Fireworks charges more than the usage tab shows" gap):
-  // Pi reports PER-PROCESS cumulative usage, so a resumed session restarted
-  // every counter at 0. The server stores cost under a monotonic clamp, so a
-  // restarted counter reads as "no new spend" and the daily rollup records
-  // nothing until the new process re-earns everything the session already
-  // spent — for a long session it never does, and the tab freezes at the
-  // largest single-process total while the provider keeps billing.
-  //
-  // session_start must seed the counters from the server's stored usage so the
-  // cumulative stays cumulative across launches.
-  const h = makeHarness({
-    captureEvents: true,
-    sessionUsage: {
-      total_cost_usd: 1.5,
-      usage_by_model: {
-        "accounts/fireworks/models/deepseek-v4p1-flash": {
-          input_tokens: 4000,
-          output_tokens: 300,
-          cache_read_input_tokens: 20000,
-        },
-        "accounts/fireworks/models/glm-5p3": {
-          input_tokens: 1000,
-          output_tokens: 100,
-          cache_read_input_tokens: 5000,
-        },
-      },
-    },
-  });
-  await h.handlers.session_start({}, makeCtx({ idle: true }));
-
-  await h.handlers.message_end(
-    { message: assistantUsageMessage({ responseId: "r1", timestamp: 1, cost: 0.00057 }) },
-    makeCtx({ idle: true }),
-  );
-
-  const last = sessionUsageEvents(h).pop();
-  assert(
-    "session_start seeds the cumulative cost from the server",
-    !!last && Math.abs(Number(last.cumulative_cost_usd) - 1.50057) < 1e-9,
-    JSON.stringify(last),
-  );
-  assert(
-    "session_start seeds cumulative tokens from every per-model bucket",
-    !!last &&
-      last.cumulative_input_tokens === 36000 &&
-      last.cumulative_output_tokens === 600 &&
-      last.cumulative_cache_read_input_tokens === 30000,
-    JSON.stringify(last),
-  );
-}
-
-async function testUsageBaselineUnavailableLeavesCountersAtZero() {
-  // Fail-open: no server reachable (or an older server without the usage
-  // fields) must leave the counters untouched — identical to the pre-fix
-  // behaviour, never a crash and never a fabricated baseline.
-  const h = makeHarness({ captureEvents: true, sessionUsage: null });
-  await h.handlers.session_start({}, makeCtx({ idle: true }));
-  await h.handlers.message_end(
-    { message: assistantUsageMessage({ responseId: "r1", timestamp: 1, cost: 0.00057 }) },
-    makeCtx({ idle: true }),
-  );
-  const last = sessionUsageEvents(h).pop();
-  assert(
-    "unavailable baseline leaves the counters at this process's usage",
-    !!last && Math.abs(Number(last.cumulative_cost_usd) - 0.00057) < 1e-9,
-    JSON.stringify(last),
-  );
-  assert(
-    "unavailable baseline leaves tokens at this process's usage",
-    !!last && last.cumulative_input_tokens === 6000 && last.cumulative_output_tokens === 200,
-    JSON.stringify(last),
-  );
-}
-
-async function testUsageBaselineAddsToThisProcessUsage() {
-  // The server value is a floor, not a reset: a smaller stored total must never
-  // be dropped (that would lose the session's earlier spend) — it is the
-  // starting point this process adds to.
-  const h = makeHarness({
-    captureEvents: true,
-    sessionUsage: { total_cost_usd: 0.0001, usage_by_model: {} },
-  });
-  await h.handlers.session_start({}, makeCtx({ idle: true }));
-  await h.handlers.message_end(
-    { message: assistantUsageMessage({ responseId: "r1", timestamp: 1, cost: 0.00057 }) },
-    makeCtx({ idle: true }),
-  );
-  const last = sessionUsageEvents(h).pop();
-  assert(
-    "a small stored baseline is kept and this process's call adds to it",
-    !!last && Math.abs(Number(last.cumulative_cost_usd) - 0.00067) < 1e-9,
-    JSON.stringify(last),
   );
 }
 
@@ -963,11 +748,6 @@ async function testQueuedPromptDuringStartupStaysRunningUntilAgentEnd() {
     await testPartialUiStillInitializes();
     await testActiveDialogCancellation();
     await testRpcModeDoesNotWrapUi();
-    await testUsageForwardsPiCost();
-    await testUsageOmitsCostWhenPiReportsNone();
-    await testUsageRestoresServerBaselineOnStart();
-    await testUsageBaselineUnavailableLeavesCountersAtZero();
-    await testUsageBaselineAddsToThisProcessUsage();
   } finally {
     for (const h of harnesses) {
       if (h.pi.__omnigentInboxPoller) clearInterval(h.pi.__omnigentInboxPoller);

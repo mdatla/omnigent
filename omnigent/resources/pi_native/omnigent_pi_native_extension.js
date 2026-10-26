@@ -786,27 +786,6 @@ function toInt(value) {
 }
 
 /**
- * Read Pi's own per-call cost total (USD), or ``0`` when absent.
- *
- * Pi prices every LLM call itself and carries the result as
- * ``usage.cost.total`` — the same figure its TUI footer and ``/session``
- * report. Forwarding it lets the session be priced even when the shared
- * catalog has no row for the model id (e.g. a gateway's own namespaced id
- * such as Fireworks' ``accounts/fireworks/models/<id>``), which otherwise
- * left the Session-cost badge at $0.00 forever.
- *
- * Mirrors the finite / non-negative guard the token counts use: a malformed
- * or negative report must never reach the server's monotonic cost clamp.
- *
- * @param value: The message's ``usage.cost`` object.
- * @returns {number} The non-negative finite total, else ``0``.
- */
-function toCost(value) {
-  const total = value && typeof value === "object" ? Number(value.total) : NaN;
-  return Number.isFinite(total) && total > 0 ? total : 0;
-}
-
-/**
  * Lift token usage out of one Pi assistant message.
  *
  * Mirrors the non-native executor's ``_extract_pi_turn_usage``
@@ -817,14 +796,9 @@ function toCost(value) {
  * (Anthropic semantics) — ``cacheRead`` / ``cacheWrite`` are separate, so the
  * full input a turn sent is ``input + cacheRead + cacheWrite``.
  *
- * ``usage.cost.total`` is carried alongside the counts: it is Pi's own
- * authoritative USD figure for the call, and forwarding it is what makes the
- * Session-cost badge correct for models the shared catalog cannot price.
- *
  * @returns {{input:number,output:number,cacheRead:number,cacheWrite:number,
- *   total:number,cost:number,model:(string|null)}|null} the per-message
- *   counts, or ``null`` when ``message`` is not an assistant message
- *   carrying usage.
+ *   total:number,cost:(number|null),model:(string|null)}|null} the per-message counts, or
+ *   ``null`` when ``message`` is not an assistant message carrying usage.
  */
 function extractPiUsage(message) {
   if (!message || typeof message !== "object") return null;
@@ -835,7 +809,6 @@ function extractPiUsage(message) {
   const output = toInt(usage.output);
   const cacheRead = toInt(usage.cacheRead);
   const cacheWrite = toInt(usage.cacheWrite);
-  const cost = toCost(usage.cost);
   // No countable tokens means Pi emitted an empty usage object — treat as "no
   // usage" so the server leaves the session unpriced rather than recording a
   // $0.00 turn (matches _aggregate_pi_turn_usage's empty-usage guard).
@@ -848,9 +821,16 @@ function extractPiUsage(message) {
     cacheRead,
     cacheWrite,
     total: toInt(usage.totalTokens),
-    cost,
+    // Pi also uses zero when its model has no price; let the server price that.
+    cost: validCost(usage.cost?.total) > 0 ? usage.cost.total : null,
     model,
   };
+}
+
+function validCost(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
 }
 
 function headers(config) {
@@ -1857,11 +1837,8 @@ module.exports = function (pi) {
   let cumulativeInputTokens = 0;
   let cumulativeOutputTokens = 0;
   let cumulativeCacheReadTokens = 0;
-  // Pi's own authoritative USD total, summed across the same messages. Sent as
-  // ``cumulative_cost_usd`` so the badge is correct even when the shared
-  // catalog cannot price the model id (a gateway's own namespaced id, e.g.
-  // Fireworks' ``accounts/fireworks/models/<id>``).
   let cumulativeCostUsd = 0;
+  let completeCost = true;
   let usageModel = null;
   let lastPostedUsageKey = "";
 
@@ -1891,70 +1868,6 @@ module.exports = function (pi) {
 
   // Fold one assistant message's usage into the cumulative session totals,
   // deduped by fingerprint. Returns true when it counted (totals advanced).
-  // Seed the cumulative counters from what the SERVER already holds for this
-  // conversation. Pi reports *per-process* cumulatives: a fresh ``pi`` launch
-  // starts every counter at 0, so a resumed session re-earns its spend from
-  // zero. The server stores cost with SET semantics under a monotonic clamp
-  // (``total_cost_usd = max(old, reported)``), so a restarted counter looks
-  // like "no progress" and the daily rollup records nothing — the session's
-  // cost freezes at the largest single-process total while the provider keeps
-  // billing every process. That is the whole "Fireworks charges more than the
-  // usage tab shows" gap: a long session resumed N times reports only its
-  // best individual run.
-  //
-  // Restoring the baseline makes the cumulative genuinely cumulative across
-  // launches, so every subsequent delta (and therefore every daily-rollup
-  // entry) is the true turn cost. The server is the only durable record here:
-  // Pi's local session file is not guaranteed to survive (the native bridge
-  // reaper removes dead owners' bridge dirs, which hold ``sessions/*.jsonl``),
-  // and ``--continue``-style replays do not re-emit usage.
-  //
-  // Best-effort and fail-open: an unreachable server leaves the counters at 0,
-  // which is exactly the old behaviour.
-  async function restoreUsageBaseline() {
-    if (!config || !config.serverUrl || !config.sessionId) return;
-    if (typeof fetch !== "function") return;
-    const url = `${config.serverUrl}/v1/sessions/${encodeURIComponent(config.sessionId)}`;
-    let payload = null;
-    try {
-      const resp = await fetch(url, { method: "GET", headers: headers(config) });
-      if (!resp || !resp.ok || typeof resp.json !== "function") return;
-      payload = await resp.json();
-    } catch (_err) {
-      return;
-    }
-    if (!payload || typeof payload !== "object") return;
-    const num = (value) => {
-      const n = Number(value);
-      return Number.isFinite(n) && n > 0 ? n : 0;
-    };
-    // ``usage_by_model`` stores the split the server derived: ``input_tokens``
-    // is the NON-cached remainder and ``cache_read_input_tokens`` is carried
-    // separately, so the extension's ``input`` (which includes cache reads)
-    // is their sum. ``cache_creation_input_tokens`` is not persisted per model;
-    // a non-zero cache-write report therefore shrinks the restored input by
-    // that amount — never the reported totals, which only ratchet up.
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let cacheReadTokens = 0;
-    const byModel = payload.usage_by_model;
-    if (byModel && typeof byModel === "object") {
-      for (const bucket of Object.values(byModel)) {
-        if (!bucket || typeof bucket !== "object") continue;
-        const cacheRead = num(bucket.cache_read_input_tokens);
-        inputTokens += num(bucket.input_tokens) + cacheRead;
-        outputTokens += num(bucket.output_tokens);
-        cacheReadTokens += cacheRead;
-      }
-    }
-    const costUsd = num(payload.total_cost_usd);
-    if (inputTokens > cumulativeInputTokens) cumulativeInputTokens = inputTokens;
-    if (outputTokens > cumulativeOutputTokens) cumulativeOutputTokens = outputTokens;
-    if (cacheReadTokens > cumulativeCacheReadTokens)
-      cumulativeCacheReadTokens = cacheReadTokens;
-    if (costUsd > cumulativeCostUsd) cumulativeCostUsd = costUsd;
-  }
-
   function accumulateUsage(message) {
     const usage = extractPiUsage(message);
     if (!usage) return false;
@@ -1971,34 +1884,32 @@ module.exports = function (pi) {
     cumulativeInputTokens += usage.input + usage.cacheRead + usage.cacheWrite;
     cumulativeOutputTokens += usage.output;
     cumulativeCacheReadTokens += usage.cacheRead;
-    cumulativeCostUsd += usage.cost;
+    if (usage.cost === null) completeCost = false;
+    else cumulativeCostUsd += usage.cost;
     if (usage.model) usageModel = usage.model;
     return true;
   }
 
-  // POST the cumulative session usage so the server prices it and publishes a
-  // ``session.usage`` event. Cumulative (SET) semantics — the server overwrites
-  // its stored totals each flush. Deduped so a flush with no advance is a
-  // no-op. Fail-open via ``postEvent`` so a failed POST never wedges Pi.
+  function usagePostKey() {
+    return `${cumulativeInputTokens}-${cumulativeOutputTokens}-${cumulativeCacheReadTokens}-${completeCost ? cumulativeCostUsd : "unknown"}-${usageModel || ""}`;
+  }
+
+  // Persist before reporting; unchanged totals need no additional POST.
   async function postSessionUsage() {
-    if (!(cumulativeInputTokens || cumulativeOutputTokens || cumulativeCostUsd))
-      return;
-    const postKey = `${cumulativeInputTokens}-${cumulativeOutputTokens}-${cumulativeCacheReadTokens}-${cumulativeCostUsd}-${usageModel || ""}`;
+    if (!(cumulativeInputTokens || cumulativeOutputTokens)) return;
+    const postKey = usagePostKey();
     if (postKey === lastPostedUsageKey) return;
     lastPostedUsageKey = postKey;
     // Persist the running total before the POST so a relaunch restores it even
     // when the flush fails and the server never records this report.
     persistCumulativeUsage();
     const data = {
+      cost_complete: completeCost,
       cumulative_input_tokens: cumulativeInputTokens,
       cumulative_output_tokens: cumulativeOutputTokens,
       cumulative_cache_read_input_tokens: cumulativeCacheReadTokens,
     };
-    // Pi's own per-call cost total, summed. The server stores
-    // ``cumulative_cost_usd`` verbatim as the display cost (monotonic), so the
-    // badge is correct even when the shared catalog can't price the model id;
-    // the token fields above still drive the per-model breakdown.
-    if (cumulativeCostUsd > 0) data.cumulative_cost_usd = cumulativeCostUsd;
+    if (completeCost) data.cumulative_cost_usd = cumulativeCostUsd;
     if (usageModel) data.model = usageModel;
     await postEvent(config, { type: "external_session_usage", data });
   }
@@ -2022,6 +1933,8 @@ module.exports = function (pi) {
           cumulative_input_tokens: cumulativeInputTokens,
           cumulative_output_tokens: cumulativeOutputTokens,
           cumulative_cache_read_input_tokens: cumulativeCacheReadTokens,
+          cost_complete: completeCost,
+          ...(completeCost ? { cumulative_cost_usd: cumulativeCostUsd } : {}),
           model: usageModel,
         }),
       );
@@ -2039,6 +1952,14 @@ module.exports = function (pi) {
     const input = toInt(saved.cumulative_input_tokens);
     const output = toInt(saved.cumulative_output_tokens);
     const cacheRead = toInt(saved.cumulative_cache_read_input_tokens);
+    const cost = validCost(saved.cumulative_cost_usd);
+    const coversCurrent = input >= cumulativeInputTokens && output >= cumulativeOutputTokens;
+    if (coversCurrent && (input || output)) {
+      completeCost = cost !== null && saved.cost_complete !== false;
+    } else if (input > cumulativeInputTokens || output > cumulativeOutputTokens) {
+      completeCost = false;
+    }
+    if (completeCost && cost !== null) cumulativeCostUsd = Math.max(cumulativeCostUsd, cost);
     // Only raise the counters; a stale file must never pull a live total down.
     if (input > cumulativeInputTokens) cumulativeInputTokens = input;
     if (output > cumulativeOutputTokens) cumulativeOutputTokens = output;
@@ -2061,9 +1982,10 @@ module.exports = function (pi) {
       baseline &&
       cumulativeInputTokens === toInt(baseline.cumulative_input_tokens) &&
       cumulativeOutputTokens === toInt(baseline.cumulative_output_tokens) &&
-      cumulativeCacheReadTokens === toInt(baseline.cumulative_cache_read_input_tokens)
+      cumulativeCacheReadTokens === toInt(baseline.cumulative_cache_read_input_tokens) &&
+      (!completeCost || cumulativeCostUsd === (validCost(baseline.cumulative_cost_usd) ?? 0))
     ) {
-      lastPostedUsageKey = `${cumulativeInputTokens}-${cumulativeOutputTokens}-${cumulativeCacheReadTokens}-${usageModel || ""}`;
+      lastPostedUsageKey = usagePostKey();
     }
   }
 
@@ -2379,10 +2301,6 @@ module.exports = function (pi) {
         ? ctx.sessionManager.getSessionId()
         : undefined;
     await patchExternalSessionId(config, nativeSessionId);
-    // Carry the server's recorded spend into this process's counters BEFORE any
-    // turn can flush usage, so a resumed session keeps accumulating instead of
-    // restarting at 0 (see restoreUsageBaseline).
-    await restoreUsageBaseline();
     // Publish Pi's live model catalog so the Web UI picker populates from what
     // Pi actually loaded, independent of how it authenticated.
     await postModelOptions(config, ctx);
