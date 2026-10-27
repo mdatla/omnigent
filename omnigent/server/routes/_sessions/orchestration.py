@@ -1178,6 +1178,7 @@ def _build_session_list_item(
     pending_count: int,
     child_session_ids: list[str],
     comments_fingerprint: CommentsFingerprint | None,
+    harness: str | None = None,
 ) -> SessionListItem:
     """
     Assemble one :class:`SessionListItem` from a conversation row and
@@ -1219,6 +1220,7 @@ def _build_session_list_item(
         wired — emitted as ``comments_count=0`` /
         ``comments_updated_at=None`` so the two states look identical
         on the wire.
+    :param harness: Resolved session harness from the batch's cached agent specs.
     :returns: The assembled :class:`SessionListItem`.
     """
     # ``conv.agent_id`` is guaranteed non-None by the caller (sessions
@@ -1234,6 +1236,7 @@ def _build_session_list_item(
         id=conv.id,
         agent_id=conv.agent_id,
         agent_name=agent_names_by_id.get(conv.agent_id),
+        harness=harness,
         status=_list_status_with_starting(
             _session_status_with_child_rollup(conv.id, child_session_ids, conv.live_status),
             conv.id,
@@ -3421,8 +3424,16 @@ def _record_native_input_lifecycle(session_id: str, event: Mapping[str, Any]) ->
     """Retain an identity-linked runner lifecycle edge on its queued web input."""
     event_type = event.get("type")
     stage = _NATIVE_INPUT_LIFECYCLE_STAGES.get(event_type) if isinstance(event_type, str) else None
-    stable_id = input_attributes(event).get("input_stable_id")
-    if stage is None or not isinstance(stable_id, str):
+    identity = input_attributes(event)
+    if any(
+        key in event and key not in identity
+        for key in ("input_stable_id", "pending_id", "delivery_attempt_id")
+    ):
+        return
+    stable_id = identity.get("input_stable_id")
+    pending_id = identity.get("pending_id")
+    delivery_attempt_id = identity.get("delivery_attempt_id")
+    if stage is None:
         return
     raw_response = event.get("response")
     response_id = raw_response.get("id") if isinstance(raw_response, dict) else None
@@ -3435,7 +3446,11 @@ def _record_native_input_lifecycle(session_id: str, event: Mapping[str, Any]) ->
         cause_class = "interrupted_or_lifecycle"
     pending_inputs.mark_lifecycle(
         session_id,
-        stable_id,
+        stable_id if isinstance(stable_id, str) else None,
+        pending_id=pending_id if isinstance(pending_id, str) else None,
+        delivery_attempt_id=(
+            delivery_attempt_id if isinstance(delivery_attempt_id, str) else None
+        ),
         stage=stage,
         cause_class=cause_class,
         reason_code=_native_input_reason_code(event),
@@ -3994,6 +4009,7 @@ async def _mark_runner_sessions_offline_impl(
     conversation_store: ConversationStore,
     *,
     fail_idle_top_level: bool = False,
+    disconnect_evidence: Mapping[str, str] | None = None,
 ) -> None:
     """
     Fail the sessions a departed runner actually interrupted, with the cause.
@@ -4036,7 +4052,11 @@ async def _mark_runner_sessions_offline_impl(
         if delay:
             await asyncio.sleep(delay)
         pending = await _mark_runner_sessions_offline_once(
-            pending, error, conversation_store, fail_idle_top_level=fail_idle_top_level
+            pending,
+            error,
+            conversation_store,
+            fail_idle_top_level=fail_idle_top_level,
+            disconnect_evidence=disconnect_evidence,
         )
         if not pending:
             return
@@ -4054,6 +4074,7 @@ async def _mark_runner_sessions_offline_once(
     conversation_store: ConversationStore,
     *,
     fail_idle_top_level: bool,
+    disconnect_evidence: Mapping[str, str] | None = None,
 ) -> list[Conversation]:
     """Reconcile each session once and return the ones blocked by metadata errors."""
     retry: list[Conversation] = []
@@ -4151,7 +4172,13 @@ async def _mark_runner_sessions_offline_once(
             continue
         if binding is None or binding[0] != conv.runner_id:
             continue
-        _publish_status(conv.id, "failed", error, failure_origin="runner_offline_sweep")
+        _publish_status(
+            conv.id,
+            "failed",
+            error,
+            failure_origin="runner_offline_sweep",
+            disconnect_evidence=disconnect_evidence,
+        )
         await record_subagent_activity(
             conv.id, "returned", conversation_store, turn_id=turn_id, status="failed"
         )
@@ -7702,6 +7729,17 @@ async def _dispatch_session_event_to_runner(*args: Any, **kwargs: Any) -> Any:
         return await _facade._dispatch_session_event_to_runner(*args, **kwargs)
 
 
+def _codex_side_chat_thread_id(conv: Conversation) -> str | None:
+    """Return the parent app-server thread that runs a Codex child's turns, if forwardable."""
+    from omnigent.server.routes._sessions.common import (
+        _CODEX_NATIVE_SUBAGENT_THREAD_ID_LABEL_KEY,
+    )
+
+    if not _is_codex_native_subagent(conv) or not conv.parent_conversation_id:
+        return None
+    return (conv.labels or {}).get(_CODEX_NATIVE_SUBAGENT_THREAD_ID_LABEL_KEY) or None
+
+
 async def _forward_codex_side_chat_turn(
     conv: Conversation,
     body: SessionEventInput,
@@ -7875,7 +7913,7 @@ async def _dispatch_session_event_to_runner_impl(
         await asyncio.to_thread(runner_router.require_mcp_registry_support, conv)
     if body.type == "message":
         disconnect_outcome.note_user_turn(conv.id)
-    if body.type == "message" and conv.kind == "sub_agent" and _is_codex_native_subagent(conv):
+    if body.type == "message" and _codex_side_chat_thread_id(conv) is not None:
         # Codex /side follow-up: drive the child on its own Codex thread via the
         # parent's runner/bridge; do not persist AP-side (the forwarder mirrors
         # the child thread echo, staying the single writer).
