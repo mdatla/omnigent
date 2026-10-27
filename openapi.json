@@ -4402,7 +4402,7 @@
         "type": "object"
       },
       "NativeUsageBaseline": {
-        "description": "Own-session cumulative tokens for resuming a native usage reporter.\n\nExcludes spawned sessions. Input includes cache reads, matching the native\nusage event contract rather than the display's separate token buckets.",
+        "description": "Own-session cumulative usage for resuming a native usage reporter.\n\nExcludes spawned sessions. Input includes cache reads, matching the native\nusage event contract rather than the display's separate token buckets.",
         "properties": {
           "cumulative_cache_read_input_tokens": {
             "default": 0,
@@ -4410,6 +4410,19 @@
             "minimum": 0.0,
             "title": "Cumulative Cache Read Input Tokens",
             "type": "integer"
+          },
+          "cumulative_cost_usd": {
+            "anyOf": [
+              {
+                "format": "double",
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cumulative Cost Usd"
           },
           "cumulative_input_tokens": {
             "default": 0,
