@@ -78,11 +78,14 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          # The default token can push because `permissions: contents: write`
-          # above is set; GITHUB_TOKEN pushes do not trigger further workflows,
-          # which is why the build job lives in THIS workflow instead of
-          # relying on the resulting push event.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # SSH deploy key (read-write) so the merge can push workflow files
+          # that upstream adds: GITHUB_TOKEN is not allowed to create or update
+          # .github/workflows/** regardless of the repo's workflow permissions
+          # (that restriction requires a `workflow`-scoped token, which the
+          # Actions token cannot have). Pushes made with this key do not
+          # trigger further workflows, which is why the build job lives in
+          # THIS workflow instead of relying on the resulting push event.
+          ssh-key: ${{ secrets.SYNC_DEPLOY_KEY }}
 
       - name: Merge upstream main
         id: merge
