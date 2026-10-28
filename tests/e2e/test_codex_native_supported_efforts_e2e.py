@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import time
+import tomllib
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -27,7 +28,6 @@ from typing import Any
 
 import httpx
 import pytest
-import tomllib
 
 from omnigent.harnesses.codex_native.app_server import client_for_transport
 from omnigent.harnesses.codex_native.bridge import read_bridge_state
@@ -41,6 +41,8 @@ _EXTENDED_MODEL = os.environ.get("OMNIGENT_TEST_CODEX_EXTENDED_MODEL", "gpt-6-so
 _SWITCH_MODEL = os.environ.get("OMNIGENT_TEST_CODEX_SWITCH_MODEL", "gpt-5.6-sol")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 pytestmark = [
     pytest.mark.posix_only,
     pytest.mark.timeout(240),
@@ -440,6 +442,70 @@ def test_codex_model_switch_clamps_inherited_effort(codex_effort_rig: _Rig) -> N
         _assert_turn(rig, session, _STANDARD_MODEL, "xhigh")
 
 
+@pytest.mark.parametrize("main_turn_first", [True, False], ids=["after_main_turn", "side_first"])
+def test_codex_side_chat_uses_switched_model_and_effort(
+    codex_effort_rig: _Rig, main_turn_first: bool
+) -> None:
+    """A /side fork opened after a model and effort switch sends the parent's new settings."""
+    rig = codex_effort_rig
+    assert "max" in rig.capabilities(_EXTENDED_MODEL)
+    assert "max" not in rig.capabilities(_STANDARD_MODEL)
+    with _session(rig, _STANDARD_MODEL, "high") as session:
+        _assert_turn(rig, session, _STANDARD_MODEL, "high")
+        _json(
+            rig.api.patch(
+                f"/v1/sessions/{session.id}",
+                json={"model_override": _EXTENDED_MODEL, "reasoning_effort": "max"},
+            )
+        )
+        if main_turn_first:
+            _assert_turn(rig, session, _EXTENDED_MODEL, "max")
+
+        # Longer than the turn markers, which the fork's inherited history also contains.
+        marker = f"SIDE_CHAT_REPLY_OK_{uuid.uuid4().hex}"
+        _json(
+            rig.model.post(
+                "/mock/configure", json={"key": marker, "responses": [], "match": marker}
+            )
+        )
+        _json(rig.model.post("/mock/set_fallback", json={"key": marker, "text": marker}))
+        before = len(_json(rig.model.get("/mock/requests"))["requests"])
+        rig.api.post(
+            f"/v1/sessions/{session.id}/events",
+            json={
+                "type": "message",
+                "data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": f"/side Reply with {marker}"}],
+                },
+            },
+        ).raise_for_status()
+        deadline = time.monotonic() + 90
+        side_requests: list[dict[str, Any]] = []
+        replied = False
+        while time.monotonic() < deadline and not (side_requests and replied):
+            requests = _json(rig.model.get("/mock/requests"))["requests"][before:]
+            side_requests = [
+                request for request in requests if marker in json.dumps(request.get("input"))
+            ]
+            children = _json(rig.api.get(f"/v1/sessions/{session.id}/child_sessions"))["data"]
+            replied = any(
+                item.get("role") == "assistant" and marker in json.dumps(item.get("content"))
+                for child in children
+                for item in _json(
+                    rig.api.get(f"/v1/sessions/{child['id']}/items", params={"limit": 100})
+                )["data"]
+            )
+            time.sleep(0.5)
+        observed = [
+            (request.get("model"), request.get("reasoning", {}).get("effort"))
+            for request in side_requests
+        ]
+        assert side_requests, f"The side fork never reached the model.\n{rig.stack.log_tail()}"
+        assert set(observed) == {(_EXTENDED_MODEL, "max")}, observed
+        assert replied, f"The side chat never showed its reply.\n{rig.stack.log_tail()}"
+
+
 def test_codex_model_pick_recreates_closed_terminal(codex_effort_rig: _Rig) -> None:
     """A model pick restores an exited TUI and keeps the live Codex thread."""
     rig = codex_effort_rig
@@ -531,3 +597,113 @@ def test_codex_resume_clamps_persisted_effort(codex_effort_rig: _Rig) -> None:
         assert resumed.socket_path != original.socket_path, "A new app-server must own the resume"
         assert resumed.thread_id == original.thread_id, "Resume must retain the existing thread"
         _assert_turn(rig, session, _STANDARD_MODEL, "low", terminal=True)
+
+
+def test_fresh_terminal_turn_reports_running_before_first_model_output(
+    codex_effort_rig: _Rig,
+) -> None:
+    """Fresh subscription recovers running status before any model output arrives."""
+    rig = codex_effort_rig
+    with _session(rig, _STANDARD_MODEL, "medium") as session:
+        marker = f"FRESH_QUIET_{uuid.uuid4().hex}"
+        _json(rig.model.post("/mock/reset"))
+        _json(
+            rig.model.post(
+                "/mock/configure",
+                json={"key": _STANDARD_MODEL, "responses": [{"text": marker, "block": True}] * 12},
+            )
+        )
+        logs = rig.stack.runner_home / ".omnigent/logs/runner"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if any(
+                "not ready yet (no/empty rollout)" in path.read_text()
+                for path in logs.glob("*.log")
+            ):
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("The fresh native thread never reached its no-rollout subscription wait")
+        session.tmux("send-keys", "-l", f"Reply with {marker}")
+        time.sleep(0.5)
+        session.tmux("send-keys", "Enter")
+        try:
+            deadline = time.monotonic() + 20
+            requests = []
+            while time.monotonic() < deadline:
+                state = read_bridge_state(session.bridge)
+                requests = [
+                    request
+                    for request in _json(rig.model.get("/mock/requests"))["requests"]
+                    if state is not None and request.get("prompt_cache_key") == state.thread_id
+                ]
+                if requests:
+                    break
+                time.sleep(0.1)
+            assert len(requests) == 1, session.tmux("capture-pane", "-p")
+            assert state is not None
+
+            async def native_snapshot() -> dict[str, Any]:
+                observer = client_for_transport(
+                    state.socket_path, client_name="fresh-turn-observer"
+                )
+                await observer.connect()
+                try:
+                    response = await observer.request(
+                        "thread/read", {"threadId": state.thread_id, "includeTurns": True}
+                    )
+                    return response["result"]["thread"]
+                finally:
+                    await observer.close()
+
+            native = asyncio.run(native_snapshot())
+            (rig.stack.root / "fresh-native-thread.json").write_text(json.dumps(native, indent=2))
+            assert len(native["turns"]) == 1
+            turn = native["turns"][0]
+            assert turn["status"] == "inProgress", native
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                snapshot = _json(rig.api.get(f"/v1/sessions/{session.id}"))
+                bridge = read_bridge_state(session.bridge)
+                if (
+                    snapshot.get("status") == "running"
+                    and bridge is not None
+                    and bridge.active_turn_id == turn["id"]
+                ):
+                    break
+                time.sleep(0.1)
+            (rig.stack.root / "fresh-quiet-terminal.txt").write_text(
+                session.tmux("capture-pane", "-p")
+            )
+            (rig.stack.root / "fresh-session-before-output.json").write_text(
+                json.dumps(snapshot, indent=2)
+            )
+            assert snapshot.get("status") == "running", snapshot.get("status")
+            assert bridge is not None and bridge.active_turn_id == turn["id"]
+            items = _json(rig.api.get(f"/v1/sessions/{session.id}/items", params={"limit": 100}))[
+                "data"
+            ]
+            assert len([item for item in items if item.get("role") == "user"]) == 1
+            assert not any(item.get("role") == "assistant" for item in items)
+        finally:
+            while _json(rig.model.post("/gate/release"))["released"]:
+                pass
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            snapshot = _json(rig.api.get(f"/v1/sessions/{session.id}"))
+            items = _json(rig.api.get(f"/v1/sessions/{session.id}/items", params={"limit": 100}))[
+                "data"
+            ]
+            replies = [
+                item
+                for item in items
+                if item.get("role") == "assistant" and marker in json.dumps(item.get("content"))
+            ]
+            if snapshot.get("status") == "idle" and replies:
+                break
+            time.sleep(0.1)
+        assert len(replies) == 1
+        assert len([item for item in items if item.get("role") == "user"]) == 1
+        assert snapshot.get("status") == "idle"
+        bridge = read_bridge_state(session.bridge)
+        assert bridge is not None and bridge.active_turn_id is None
