@@ -1,0 +1,27 @@
+# Obsidian Sync sidecar for the Omnigent Unraid stack.
+#
+# Replaces the boot-time `ob sync` daemon loop that used to be forked from
+# startup-shim.sh. `ob sync --continuous` already runs in the foreground, so the
+# restart supervision that the old shell loop hand-rolled is now compose's job
+# (`restart: unless-stopped`).
+#
+# Auth state lives in /root/.config/obsidian-headless and the vault in
+# /root/vaults/<vault>; the compose service bind-mounts /root, so both persist
+# exactly as they did when this ran inside the host container.
+#
+# Pin the CLI: `ob` is the only moving part here, and a surprise minor bump
+# should be a deliberate change, not a side effect of a rebuild.
+FROM node:22-slim
+
+ARG OBSIDIAN_HEADLESS_VERSION=0.0.14
+
+RUN npm install --global --no-fund --no-audit \
+      "obsidian-headless@${OBSIDIAN_HEADLESS_VERSION}" \
+ && npm cache clean --force \
+ && ob --version
+
+# `ob` writes nothing outside the mounted /root in normal use.
+WORKDIR /root
+
+ENTRYPOINT ["ob"]
+CMD ["sync", "--path", "/root/vaults/main_v2", "--continuous"]

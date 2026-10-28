@@ -1,0 +1,147 @@
+# Omnigent — full Unraid stack (server + host + sync + backup + tunnel)
+#
+# One stack, one update command:
+#
+#     docker compose pull && docker compose up -d
+#
+# That is the whole update ritual. There is no shim, no post-upgrade patch
+# step, and no PATH surgery: everything that used to be done at container boot
+# (forking Obsidian Sync, forking the vault backup daemon, re-pointing
+# /usr/local/bin/omnigent) is expressed as a service here, and every
+# customization lives in the fork's images rather than in a container layer.
+#
+# WHY THERE IS NO SHIM ANY MORE
+#   The old container needed /root/obsidian-sync/startup-shim.sh because it had
+#   no init system: PID 1 was `omnigent host`, and the sync + backup daemons had
+#   to be forked from the only hook available. Compose removes that constraint.
+#   `ob sync --continuous` runs in the foreground, the backup script loops
+#   forever, and `restart: unless-stopped` supplies the supervision the shell
+#   loops used to hand-roll. Nothing needs to intercept `omnigent` on PATH, so
+#   `omnigent upgrade` is never run inside a container any more — the image tag
+#   is the only version control that exists.
+#
+# WHY SQLITE AND NOT POSTGRES
+#   Single user, single node. Sqlite means the entire database is one file in a
+#   named volume, so migrating off the old server is `cp chat.db` instead of a
+#   dump/restore, and there is one less service to keep updated. To switch to
+#   Postgres later, add the postgres service from the upstream
+#   deploy/docker/docker-compose.yaml and change DATABASE_URL; the server creates
+#   its schema with migrations on first boot either way.
+#
+# PREREQUISITES
+#   - .env next to this file (copy .env.example and fill it in).
+#   - The image namespace below must match your fork. Defaults to mdatla.
+#   - Cloudflare tunnel ingress for the public hostname must point at
+#     http://omnigent:8000 (the compose service), not localhost:8000.
+#     See README.md, phase 2.
+
+name: omnigent
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ── server ────────────────────────────────────────────────────────────────
+  # Coordinator only: HTTP/SSE routes, runner tunnel acceptor, SQLAlchemy
+  # stores. It never executes harnesses — the host container does.
+  omnigent:
+    image: ghcr.io/${OMNIGENT_ORG:-mdatla}/omnigent-server:${OMNIGENT_TAG:-latest}
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      # Absolute sqlite path: four slashes = "sqlite://" + "/data/omnigent.db".
+      DATABASE_URL: sqlite:////data/omnigent.db
+      ARTIFACT_DIR: /data/artifacts
+      HOST: 0.0.0.0
+      PORT: "8000"
+      OMNIGENT_FEATURES: "${OMNIGENT_FEATURES:-}"
+      # Anchors the data dir on the volume so the admin roster survives
+      # restarts. Account rows live in the sqlite file, not here.
+      OMNIGENT_ADMIN_CREDENTIALS_PATH: /data/admin-credentials
+      # Explicit, not inferred: an explicit provider always wins, and stating
+      # it here means a future change to the enable-switch defaults cannot
+      # silently boot this tunnel-exposed server in single-user mode.
+      OMNIGENT_AUTH_PROVIDER: "${OMNIGENT_AUTH_PROVIDER:-accounts}"
+      OMNIGENT_AUTH_ENABLED: "1"
+      OMNIGENT_ACCOUNTS_COOKIE_SECRET: "${OMNIGENT_ACCOUNTS_COOKIE_SECRET:?set OMNIGENT_ACCOUNTS_COOKIE_SECRET in .env (openssl rand -hex 32)}"
+      # Must match the tunnel hostname exactly: the login redirect and cookie
+      # domain are derived from it.
+      OMNIGENT_ACCOUNTS_BASE_URL: "${OMNIGENT_PUBLIC_URL:?set OMNIGENT_PUBLIC_URL in .env, e.g. https://omni.mdatla.us}"
+      OMNIGENT_ACCOUNTS_AUTO_OPEN: "0"
+      OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD: "${OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD:-}"
+    volumes:
+      - omnigent-data:/data
+    ports:
+      # Loopback only, for curl/diagnostics from the Unraid shell. Public
+      # access is solely through cloudflared.
+      - "127.0.0.1:${OMNIGENT_BIND_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── host: this machine's runner ───────────────────────────────────────────
+  # Same role the old `omnigent-agent` container had, minus the shim. The host
+  # image has NO ENTRYPOINT (it is CMD-only so sandbox launchers can drive it),
+  # so `command` must name the binary. That is also why the old argv-to-shim
+  # trap cannot recur here: there is nothing between docker and omnigent.
+  omnigent-unraid:
+    image: ghcr.io/${OMNIGENT_ORG:-mdatla}/omnigent-host:${OMNIGENT_TAG:-latest}
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["omnigent", "host", "${OMNIGENT_SERVER_URL:?set OMNIGENT_SERVER_URL in .env, e.g. https://omni.mdatla.us}"]
+    # /root is the whole persistent state: ~/.omnigent (config + bridge dirs),
+    # vaults/, workspace/. Identical to the old container's bind mount.
+    volumes:
+      - /root:/root
+    depends_on:
+      - omnigent
+
+  # ── Obsidian Sync ─────────────────────────────────────────────────────────
+  # Replaces the boot-time `ob sync` daemon loop. Foreground by design.
+  obsidian-sync:
+    image: ghcr.io/${OMNIGENT_ORG:-mdatla}/omnigent-obsidian-sync:${OMNIGENT_TAG:-latest}
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["sync", "--path", "${OBSIDIAN_VAULT:-/root/vaults/main_v2}", "--continuous"]
+    volumes:
+      # Vault plus ~/.config/obsidian-headless (the CLI's auth state).
+      - /root:/root
+
+  # ── vault backup ──────────────────────────────────────────────────────────
+  # The existing backup-daemon.sh already loops forever on a fixed interval, so
+  # it runs as-is. The host image is reused because the script needs bash + git
+  # and that image is already pulled for the host service.
+  vault-backup:
+    image: ghcr.io/${OMNIGENT_ORG:-mdatla}/omnigent-host:${OMNIGENT_TAG:-latest}
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["/bin/bash", "/root/workspace/maanstr-lab/projects/vault-backup/scripts/backup-daemon.sh"]
+    volumes:
+      - /root:/root
+    depends_on:
+      - omnigent
+
+  # ── Cloudflare tunnel ─────────────────────────────────────────────────────
+  # Ingress for the public hostname must be configured to
+  #   http://omnigent:8000
+  # in the Cloudflare dashboard (or in a locally-managed tunnel config).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARED_TUNNEL_TOKEN:?set CLOUDFLARED_TUNNEL_TOKEN in .env}"
+    depends_on:
+      - omnigent
+
+volumes:
+  # Database + artifacts + admin roster. This is the only irreplaceable state
+  # in the stack; back it up before any version jump.
+  omnigent-data:

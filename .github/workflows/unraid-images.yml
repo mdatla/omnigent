@@ -1,0 +1,253 @@
+# Fork sync + Unraid images for mdatla/omnigent
+#
+# Two jobs in one workflow, because the build must run on the tree that was
+# just synced (not on a stale checkout):
+#
+#   1. sync   — merge upstream omnigent-ai/omnigent main into this fork's main.
+#   2. build  — build the server image, the host image, and the Obsidian Sync
+#               sidecar, and push all three to GHCR under the fork namespace.
+#
+# WHY A MERGE AND NOT A FAST-FORWARD
+#   This fork is not a pure mirror: it carries additive-only files under
+#   deploy/unraid/ plus this workflow. Those commits sit on top of upstream, so
+#   upstream/main is never a descendant of fork/main. A plain merge keeps the
+#   additive commit graph and stays conflict-free as long as upstream does not
+#   touch deploy/unraid/** (it has no reason to).
+#
+#   If a merge ever conflicts, this workflow FAILS LOUDLY and pushes nothing.
+#   That is deliberate: an auto-resolved conflict in someone else's source tree
+#   is exactly the kind of silent corruption that is expensive to find later.
+#   Resolve it by hand, push, and re-run.
+#
+# WHY THE SCHEDULE IS 08:17 UTC
+#   Upstream's nightly image rebuild runs at 07:00 UTC on main HEAD. Syncing and
+#   building after it means this fork's images follow the same daily cadence,
+#   about an hour behind, with no extra cost when upstream has not moved (the
+#   build job is skipped when the merge produced no new commit).
+#
+# REQUIRED REPO SETTINGS (one-time, in the fork's GitHub UI)
+#   Settings -> Actions -> General -> Workflow permissions:
+#     "Read and write permissions" (the sync job pushes to main).
+#   The GHCR packages this creates start PRIVATE. Flip each to public once
+#   (Package settings -> Change visibility) or add a registry login on the
+#   Docker host. See deploy/unraid/README.md.
+
+name: Fork sync + Unraid images
+
+on:
+  schedule:
+    # Daily, ~1h after upstream's 07:00 UTC nightly image rebuild.
+    - cron: '17 8 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Rebuild images even if upstream has not moved'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/unraid/**'
+      - '.github/workflows/unraid-images.yml'
+
+# Never let a manual run and a scheduled run race on main or on :latest.
+concurrency:
+  group: fork-sync-images
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # sync job pushes the merge commit
+  packages: write   # build job pushes to ghcr.io/mdatla/*
+
+env:
+  UPSTREAM_REPO: omnigent-ai/omnigent
+  UPSTREAM_BRANCH: main
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}
+
+jobs:
+  sync:
+    name: Sync fork with upstream
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+      sha: ${{ steps.merge.outputs.sha }}
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # The default token can push because `permissions: contents: write`
+          # above is set; GITHUB_TOKEN pushes do not trigger further workflows,
+          # which is why the build job lives in THIS workflow instead of
+          # relying on the resulting push event.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream main
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+
+          before="$(git rev-parse HEAD)"
+          upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          echo "fork HEAD:       ${before}"
+          echo "upstream HEAD:   ${upstream_sha}"
+
+          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            echo "Fork already contains upstream main; nothing to merge."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "sha=${before}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge --no-edit --no-ff "$upstream_sha"; then
+            echo "::error::Merge conflict with upstream ${upstream_sha}."
+            echo "::error::Resolve by hand (git fetch upstream && git merge upstream/main),"
+            echo "::error::keeping deploy/unraid/** additive-only, then push and re-run."
+            git merge --abort || true
+            exit 1
+          fi
+
+          after="$(git rev-parse HEAD)"
+          if [ "$after" = "$before" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=${after}" >> "$GITHUB_OUTPUT"
+          git push origin HEAD:main
+
+      - name: Smoke-test the merged tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Cheap structural checks so a broken merge cannot reach the image
+          # build. These are the files the image build depends on.
+          for f in deploy/docker/Dockerfile pyproject.toml uv.lock deploy/unraid/docker-compose.yaml; do
+            test -s "$f" || { echo "::error::missing or empty: $f"; exit 1; }
+          done
+          # The compose file must still parse as YAML.
+          python3 - <<'PY'
+          import sys
+          try:
+              import yaml
+          except ImportError:
+              sys.exit(0)   # runner has PyYAML; skip silently if not
+          with open("deploy/unraid/docker-compose.yaml") as fh:
+              doc = yaml.safe_load(fh)
+          assert doc.get("services"), "compose file has no services"
+          print("compose services:", ", ".join(sorted(doc["services"])))
+          PY
+
+  build:
+    name: Build and push images
+    needs: sync
+    # force_build lets a manual run rebuild without an upstream change.
+    if: needs.sync.outputs.changed == 'true' || inputs.force_build == true || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout synced main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Compute tags
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse --short=12 HEAD)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- server image (default Dockerfile target) -------------------------
+      - name: Build and push server
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          # amd64 only: the Unraid box is amd64, and a single-arch build keeps
+          # the workflow inside the free runner budget. Add linux/arm64 here if
+          # an arm64 host ever joins the stack.
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/omnigent-server:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/omnigent-server:sha-${{ steps.tags.outputs.sha }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,scope=server,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=fork-${{ steps.tags.outputs.date }}
+
+      # ---- host image (`host` target) ---------------------------------------
+      - name: Build and push host
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          target: host
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/omnigent-host:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/omnigent-host:sha-${{ steps.tags.outputs.sha }}
+          cache-from: type=gha,scope=host
+          cache-to: type=gha,scope=host,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=fork-${{ steps.tags.outputs.date }}
+
+      # ---- obsidian sync sidecar -------------------------------------------
+      - name: Build and push obsidian-sync
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/unraid
+          file: deploy/unraid/Dockerfile.obsidian-sync
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/omnigent-obsidian-sync:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/omnigent-obsidian-sync:sha-${{ steps.tags.outputs.sha }}
+          cache-from: type=gha,scope=obsidecar
+          cache-to: type=gha,scope=obsidecar,mode=max
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### Images pushed"
+            echo ""
+            echo "| image | tags |"
+            echo "|---|---|"
+            echo "| \`${REGISTRY}/${IMAGE_NAMESPACE}/omnigent-server\` | \`latest\`, \`sha-${SHA}\` |"
+            echo "| \`${REGISTRY}/${IMAGE_NAMESPACE}/omnigent-host\` | \`latest\`, \`sha-${SHA}\` |"
+            echo "| \`${REGISTRY}/${IMAGE_NAMESPACE}/omnigent-obsidian-sync\` | \`latest\`, \`sha-${SHA}\` |"
+            echo ""
+            echo "Deploy on the Docker host:"
+            echo '```'
+            echo "cd /path/to/deploy/unraid && docker compose pull && docker compose up -d"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          SHA: ${{ steps.tags.outputs.sha }}
