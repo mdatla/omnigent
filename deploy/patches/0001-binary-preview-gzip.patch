@@ -1,0 +1,47 @@
+--- a/omnigent/server/routes/_gzip_route.py
++++ b/omnigent/server/routes/_gzip_route.py
+@@ -120,25 +120,35 @@
+     ) -> None:
+         super().__init__(app, minimum_size, compresslevel=compresslevel)
+         self._state = state
+ 
+     async def send_with_compression(self, message: Message) -> None:
+         """
+-        Widen Starlette's exclusion set when the handler opted out.
++        Pass an opted-out response through untouched.
++
++        The opt-out is honoured by forwarding messages straight to the client
++        instead of flipping ``content_type_is_excluded``. Starlette reads that
++        flag when ``http.response.start`` arrives and, when it is set, emits the
++        start message immediately; setting it later — from the first body
++        message, which is when a handler's opt-out first becomes visible — sends
++        the body with no preceding start. Any ``BaseHTTPMiddleware`` in the
++        stack then fails its ``assert message["type"] == "http.response.start"``
++        and the request becomes a 500.
++
++        Forwarding here keeps the opt-out working across Starlette versions:
++        the handler sets the flag before returning, so the very first
++        ``http.response.start`` already sees it.
+ 
+         :param message: The outgoing ASGI message.
+         :returns: None.
+         """
+-        if (
+-            message["type"] == "http.response.body"
+-            and not self.started
+-            and self._state.get(SKIP_GZIP_STATE_KEY)
+-        ):
+-            # Starlette reads this flag on the first body message, then emits
+-            # the start message it buffered — untouched.
+-            self.content_type_is_excluded = True
++        if self._state.get(SKIP_GZIP_STATE_KEY):
++            if message["type"] == "http.response.start":
++                self.initial_message = message
++            await self.send(message)
++            return
+         await super().send_with_compression(message)
+ 
+ 
+ class GZipFileContentRoute(APIRoute):
+     """
+     Route class that gzips this route's responses.

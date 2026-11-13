@@ -162,6 +162,29 @@ jobs:
           ref: main
           fetch-depth: 1
 
+      # Local fixes live here, not in a running container. A file in
+      # deploy/patches/ is applied to the checkout, so the image carries it.
+      # Three outcomes, all deliberate:
+      #   applies            -> the image gets the fix
+      #   applies in reverse -> the fix is upstream; warn and continue
+      #   does not apply     -> upstream moved; fail and rebase the patch
+      - name: Apply downstream patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for p in deploy/patches/*.patch; do
+            if git apply --check "$p"; then
+              git apply "$p"
+              echo "applied $(basename "$p")"
+            elif git apply --check --reverse "$p"; then
+              echo "::warning::$(basename "$p") is already upstream — delete it"
+            else
+              echo "::error::$(basename "$p") does not apply; rebase it against upstream"
+              exit 1
+            fi
+          done
+
       - name: Compute tags
         id: tags
         shell: bash
