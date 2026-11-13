@@ -68,7 +68,7 @@ env:
 jobs:
   sync:
     name: Sync fork with upstream
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       changed: ${{ steps.merge.outputs.changed }}
       sha: ${{ steps.merge.outputs.sha }}
@@ -154,7 +154,7 @@ jobs:
     needs: sync
     # force_build lets a manual run rebuild without an upstream change.
     if: needs.sync.outputs.changed == 'true' || inputs.force_build == true || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout synced main
         uses: actions/checkout@v4

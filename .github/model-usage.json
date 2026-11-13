@@ -133,6 +133,7 @@
     "ui-snapshot-fail-comment.yml",
     "ui-snapshot-update.yml",
     "ui-snapshot.yml",
+    "unraid-images.yml",
     "vscode-extension-release.yml",
     "waiting-on-author-review-run.yml",
     "waiting-on-author-review.yml",
