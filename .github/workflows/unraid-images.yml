@@ -48,6 +48,7 @@ on:
     branches: [main]
     paths:
       - 'deploy/unraid/**'
+      - 'deploy/patches/**'
       - '.github/workflows/unraid-images.yml'
 
 # Never let a manual run and a scheduled run race on main or on :latest.
