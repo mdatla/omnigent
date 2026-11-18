@@ -55,6 +55,7 @@ class Feature(StrEnum):
     WORKSPACE_API_SERVER_ACCESS = "workspace_api_server_access"
     PROACTIVE_AGENT = "proactive_agent"
     USER_INBOX = "user_inbox"
+    MEMORY = "memory"
 
 
 @dataclass(frozen=True)
@@ -149,13 +150,23 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
         feature=Feature.GRID_SESSIONS_DISPLAY_UI,
         description="Local session grids with up to four live conversations",
         owner="web",
-        review_by_release="0.20.0",
+        # On by default; remove the flag and its off path in 0.25.0.
+        review_by_release="0.25.0",
+        default_enabled=True,
     ),
     FeatureDefinition(
         feature=Feature.SPLITTABLE_TERMINAL_VIEW_UI,
         description="Split the main terminal view into several shell panes",
         owner="web",
         review_by_release="0.22.0",
+    ),
+    FeatureDefinition(
+        feature=Feature.MEMORY,
+        description="Long-term memory: the memory_* tools and the /v1/memory routes",
+        owner="server",
+        review_by_release="0.24.0",
+        frontend_visible=False,
+        default_enabled=False,
     ),
     FeatureDefinition(
         feature=Feature.USAGE_PAGE,
@@ -229,7 +240,9 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
         feature=Feature.WORKSPACE_CONTENT_SEARCH,
         description="Search workspace file contents through the session runner",
         owner="web",
-        review_by_release="0.20.0",
+        # On by default; remove the flag and its off path in 0.25.0.
+        review_by_release="0.25.0",
+        default_enabled=True,
     ),
     FeatureDefinition(
         feature=Feature.SIDEBAR_WINDOWED_ROWS,
